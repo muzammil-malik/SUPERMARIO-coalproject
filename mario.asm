@@ -81,6 +81,14 @@ test_colors:
     db COLOR_HERO, COLOR_ENEMY, COLOR_TEXT, COLOR_HUD
 TEST_COLOR_COUNT   equ $ - test_colors
 
+; Each entry contains x, y, width, height.
+border_rectangles:
+    dw 0, 0, SCREEN_WIDTH, 1
+    dw 0, SCREEN_HEIGHT - 1, SCREEN_WIDTH, 1
+    dw 0, 0, 1, SCREEN_HEIGHT
+    dw SCREEN_WIDTH - 1, 0, 1, SCREEN_HEIGHT
+BORDER_COUNT       equ ($ - border_rectangles) / 8
+
 start:
     ; Open graphics mode and set up the data and video segments.
     mov ax, GRAPHICS_MODE
@@ -124,6 +132,22 @@ draw_swatch:
     add bx, SWATCH_STEP
     loop draw_swatch
 
+    ; Draw four single-pixel edges to test valid screen limits.
+    mov si, border_rectangles
+    mov cx, BORDER_COUNT
+
+draw_border:
+    mov ax, COLOR_WHITE
+    push ax
+    push word [si+6]
+    push word [si+4]
+    push word [si+2]
+    push word [si]
+    call FillRect
+
+    add si, 8
+    loop draw_border
+
     ; PutPixel(10, 2, COLOR_WHITE)
     mov ax, COLOR_WHITE
     push ax
@@ -132,6 +156,28 @@ draw_swatch:
     mov ax, 10
     push ax
     call PutPixel
+
+    ; PutPixel(320, 0, COLOR_HERO) must be skipped.
+    mov ax, COLOR_HERO
+    push ax
+    xor ax, ax
+    push ax
+    mov ax, SCREEN_WIDTH
+    push ax
+    call PutPixel
+
+    ; FillRect(319, 20, 2, 8, COLOR_HERO) must be skipped.
+    mov ax, COLOR_HERO
+    push ax
+    mov ax, 8
+    push ax
+    mov ax, 2
+    push ax
+    mov ax, 20
+    push ax
+    mov ax, SCREEN_WIDTH - 1
+    push ax
+    call FillRect
 
     ; Keep the test screen visible until a key is pressed.
     mov ah, 00h
