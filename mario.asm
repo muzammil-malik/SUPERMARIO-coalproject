@@ -84,6 +84,14 @@ test_colors:
     db COLOR_HERO, COLOR_ENEMY, COLOR_TEXT, COLOR_HUD
 TEST_COLOR_COUNT   equ $ - test_colors
 
+; Each entry contains x, y, width, height.
+border_rectangles:
+    dw 0, 0, SCREEN_WIDTH, 1
+    dw 0, SCREEN_HEIGHT - 1, SCREEN_WIDTH, 1
+    dw 0, 0, 1, SCREEN_HEIGHT
+    dw SCREEN_WIDTH - 1, 0, 1, SCREEN_HEIGHT
+BORDER_COUNT       equ ($ - border_rectangles) / 8
+
 ; Module 3 tile codes
 TILE_SKY           equ 0
 TILE_GROUND        equ 1
@@ -110,34 +118,19 @@ tile_test_results:
     times TILE_TEST_COUNT dw 0
 
 start:
+    ; Enter 320 by 200 graphics mode.
     mov ax, GRAPHICS_MODE
     int 10h
 
+    ; Use DS for our data and ES for video memory.
     push cs
     pop ds
     mov ax, VIDEO_SEGMENT
     mov es, ax
 
-    ; Run the tile lookups and save each AX result for AFD.
-    mov si, tile_test_points
-    mov di, tile_test_results
-    mov cx, TILE_TEST_COUNT
-
-run_tile_test:
-    mov ax, original_map
-    push ax                     ; Map address
-    push word [si+2]            ; World y
-    push word [si]              ; World x
-    call GetTile
-    mov [di], ax
-
-    add si, 4                   ; Next pair of coordinates
-    add di, 2                   ; Next result word
-    loop run_tile_test
-
-tile_tests_done:
-    ; FillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_GRAY)
-    mov ax, COLOR_GRAY
+    ; Fill the screen with dark gray so the black swatch is visible.
+    ; FillRect(0, 0, 320, 200, 8)
+    mov ax, 8
     push ax
     mov ax, SCREEN_HEIGHT
     push ax
@@ -148,6 +141,7 @@ tile_tests_done:
     push ax
     call FillRect
 
+    ; Draw one rectangle for each game colour.
     mov si, test_colors
     mov bx, SWATCH_X
     mov cx, TEST_COLOR_COUNT
@@ -169,6 +163,22 @@ draw_swatch:
     add bx, SWATCH_STEP
     loop draw_swatch
 
+    ; Draw four single-pixel edges to test valid screen limits.
+    mov si, border_rectangles
+    mov cx, BORDER_COUNT
+
+draw_border:
+    mov ax, COLOR_WHITE
+    push ax
+    push word [si+6]
+    push word [si+4]
+    push word [si+2]
+    push word [si]
+    call FillRect
+
+    add si, 8
+    loop draw_border
+
     ; PutPixel(10, 2, COLOR_WHITE)
     mov ax, COLOR_WHITE
     push ax
@@ -178,107 +188,47 @@ draw_swatch:
     push ax
     call PutPixel
 
-    ; Wait for a key so the palette remains visible.
+    ; Wait for a key so we can inspect the test picture.
     mov ah, 00h
     int 16h
 
 exit_program:
+    ; Restore text mode, then return to DOS.
     mov ax, TEXT_MODE
     int 10h
     mov ax, 4C00h
     int 21h
 
-; GetTile
-; Purpose: Read the tile at a world pixel position.
-; Inputs: Stack words x, y, and map address in DS.
-; Outputs: AX = tile code, or FFFFh for an invalid coordinate.
-; Registers changed: AX and flags.
-GetTile:
-    push bp
-    mov bp, sp
-    push bx
-    push cx
-    push dx
-
-    ; Check world bounds before reading the map.
-    mov bx, [bp+4]
-    cmp bx, MAP_PIXEL_WIDTH
-    jae .invalid
-
-    mov ax, [bp+6]
-    cmp ax, MAP_PIXEL_HEIGHT
-    jae .invalid
-
-    ; Divide by 16 to find the tile column and row.
-    mov cl, TILE_SHIFT
-    shr bx, cl                  ; BX = column
-    shr ax, cl                  ; AX = row
-
-    ; MUL CX calculates DX:AX = row * MAP_COLUMNS.
-    mov cx, MAP_COLUMNS
-    mul cx
-    add bx, ax                  ; BX = row * 60 + column
-    add bx, [bp+8]              ; BX = address of the tile
-
-    xor ax, ax
-    mov al, [bx]                ; Read one byte. AH stays zero.
-    jmp .done
-
-.invalid:
-    mov ax, INVALID_TILE
-
-.done:
-    pop dx
-    pop cx
-    pop bx
-    pop bp
-    ret 6
-
-; GetPixelOffset
-; Purpose: Convert a valid screen coordinate to a VGA byte offset.
-; Inputs: Stack words x and y.
-; Outputs: AX = y * 320 + x.
-; Registers changed: AX and flags.
-GetPixelOffset:
-    push bp
-    mov bp, sp
-    push cx
-    push dx
-
-    mov ax, [bp+6]
-    mov dx, ax
-    mov cl, 8
-    shl ax, cl                  ; AX = y * 256
-    mov cl, 6
-    shl dx, cl                  ; DX = y * 64
-    add ax, dx
-    add ax, [bp+4]
-
-    pop dx
-    pop cx
-    pop bp
-    ret 4
-
 ; PutPixel
-; Purpose: Draw one pixel if it is inside the screen.
-; Inputs: Stack words x, y, colour. ES is the drawing segment.
-; Outputs: Writes one byte for a valid coordinate.
-; Registers changed: Flags only on return.
+; Purpose: Write one pixel if its coordinates are inside the screen.
+; Inputs: Stack words x, y, colour. ES points to the drawing segment.
+; Outputs: One byte written for valid coordinates.
+; Registers changed: None on return. Flags may change.
 PutPixel:
     push bp
     mov bp, sp
     push ax
+    push bx
+    push cx
     push di
 
-    cmp word [bp+4], SCREEN_WIDTH
-    jae .done
-    cmp word [bp+6], SCREEN_HEIGHT
-    jae .done
+    mov bx, [bp+4]
+    cmp bx, SCREEN_WIDTH
+    jae pixel_done
 
-    push word [bp+6]
-    push word [bp+4]
-    call GetPixelOffset
+    mov ax, [bp+6]
+    cmp ax, SCREEN_HEIGHT
+    jae pixel_done
+
+    ; DI = y * 256 + y * 64 + x
     mov di, ax
+    mov cl, 8
+    shl di, cl
+    mov cl, 6
+    shl ax, cl
+    add di, ax
+    add di, bx
+
     mov ax, [bp+8]
     mov [es:di], al
 
@@ -291,8 +241,8 @@ PutPixel:
 ; FillRect
 ; Purpose: Fill a rectangle that fits entirely inside the screen.
 ; Inputs: Stack words x, y, width, height, colour.
-;         ES is the drawing segment.
-; Outputs: Draws a valid rectangle.
+;         ES points to the drawing segment.
+; Outputs: Rectangle drawn. Empty or out-of-bounds rectangles are skipped.
 ; Registers changed: None on return. Caller flags are restored.
 FillRect:
     push bp
@@ -304,7 +254,7 @@ FillRect:
     push dx
     push di
 
-    ; Check x, then compare width with the space left on the row.
+    ; Check x and width. The right edge may reach column 319.
     mov bx, [bp+4]
     cmp bx, SCREEN_WIDTH
     jae .done
@@ -315,7 +265,7 @@ FillRect:
     cmp cx, ax
     ja .done
 
-    ; Check y, then compare height with the rows left on screen.
+    ; Check y and height. The bottom edge may reach row 199.
     mov bx, [bp+6]
     cmp bx, SCREEN_HEIGHT
     jae .done
@@ -325,13 +275,18 @@ FillRect:
     cmp dx, 0
     je .done
     cmp dx, ax
-    ja .done
+    ja rectangle_done
 
-    push word [bp+6]
-    push word [bp+4]
-    call GetPixelOffset
-    mov di, ax
+    ; Calculate the offset of the rectangle's first pixel.
+    mov di, bx
+    mov cl, 8
+    shl di, cl
+    mov cl, 6
+    shl bx, cl
+    add di, bx
+    add di, [bp+4]
 
+    ; After writing a row, skip to the same x on the next row.
     mov bx, SCREEN_WIDTH
     sub bx, [bp+8]              ; Gap to the next row's starting x
     mov ax, [bp+12]
