@@ -4,7 +4,7 @@ org 100h
 
 jmp start
 
-; Display and level
+; Display and level constants
 SCREEN_WIDTH       equ 320
 SCREEN_HEIGHT      equ 200
 TILE_SIZE          equ 16
@@ -14,6 +14,8 @@ MAP_ROWS           equ 12
 MAP_BYTES          equ MAP_COLUMNS * MAP_ROWS
 MAP_PIXEL_WIDTH    equ MAP_COLUMNS * TILE_SIZE
 MAP_PIXEL_HEIGHT   equ MAP_ROWS * TILE_SIZE
+VISIBLE_COLUMNS    equ SCREEN_WIDTH / TILE_SIZE
+LAST_COLUMN        equ MAP_COLUMNS - VISIBLE_COLUMNS
 
 TEXT_MODE          equ 03h
 GRAPHICS_MODE      equ 13h
@@ -32,6 +34,8 @@ COLOR_ENEMY        equ 13
 COLOR_TEXT         equ COLOR_WHITE
 COLOR_HUD          equ COLOR_BLACK
 COLOR_GRAY         equ 8
+COLOR_YELLOW       equ 14
+COLOR_LIGHT_GREEN  equ 10
 
 ; Keyboard scan codes
 KEY_ESC            equ 01h
@@ -55,178 +59,228 @@ MAX_SCORE          equ 999999
 MAX_ENEMIES        equ 8
 COINS_FOR_LIFE     equ 100
 
-; Hero data
+; Initial game data
 player_x           dw 32
 player_hp          db START_HP
 player_lives       db START_LIVES
-
-; Enemy data
 active_enemy_count db 0
-
-; Score and coins
 score_low          dw 0
 score_high         dw 0
 coin_count         db 0
-
-; Clock and keyboard data
 time_left          dw START_TIME
 key_states         times KEY_COUNT db 0
 
-; Module 2 palette test
-SWATCH_WIDTH       equ 28
-SWATCH_HEIGHT      equ 32
-SWATCH_STEP        equ 36
-SWATCH_X           equ 20
-SWATCH_Y           equ 60
+; Tile codes from Appendix A.2
+TILE_SKY           equ 0
+TILE_GROUND        equ 1
+TILE_BRICK         equ 2
+TILE_QUESTION_COIN equ 3
+TILE_QUESTION_MUSH equ 4
+TILE_EMPTY_BLOCK   equ 5
+TILE_PIPE_TOP_L    equ 6
+TILE_PIPE_TOP_R    equ 7
+TILE_PIPE_BODY_L   equ 8
+TILE_PIPE_BODY_R   equ 9
+TILE_STAIR         equ 10
+TILE_COIN          equ 11
+TILE_FLAG          equ 12
+INVALID_TILE       equ 0FFFFh
 
+tile_colors:
+    db COLOR_SKY, COLOR_GROUND, COLOR_BRICK, COLOR_YELLOW
+    db COLOR_ENEMY, COLOR_GRAY
+    db COLOR_LIGHT_GREEN, COLOR_LIGHT_GREEN
+    db COLOR_PIPE, COLOR_PIPE, COLOR_GRAY, COLOR_YELLOW, COLOR_WHITE
+TILE_COLOR_COUNT equ $ - tile_colors
+
+; Pad the row with sky up to the requested column.
+%macro SKY_TO 2
+    times (%2 - ($ - %1)) db TILE_SKY
+%endmacro
+
+original_map:
+    ; Row 0 is reserved for the HUD. Row 1 is sky.
+    times MAP_COLUMNS * 2 db TILE_SKY
+
+row_2:
+    SKY_TO row_2, 57
+    db TILE_FLAG
+    SKY_TO row_2, MAP_COLUMNS
+
+row_3:
+    SKY_TO row_3, 57
+    db TILE_FLAG
+    SKY_TO row_3, MAP_COLUMNS
+
+row_4:
+    SKY_TO row_4, 57
+    db TILE_FLAG
+    SKY_TO row_4, MAP_COLUMNS
+
+row_5:
+    SKY_TO row_5, 23
+    times 3 db TILE_COIN
+    SKY_TO row_5, 57
+    db TILE_FLAG
+    SKY_TO row_5, MAP_COLUMNS
+
+row_6:
+    SKY_TO row_6, 5
+    db TILE_QUESTION_MUSH
+    SKY_TO row_6, 11
+    db TILE_QUESTION_COIN
+    SKY_TO row_6, 26
+    db TILE_QUESTION_COIN
+    SKY_TO row_6, 35
+    db TILE_QUESTION_MUSH
+    SKY_TO row_6, 39
+    times 3 db TILE_COIN
+    SKY_TO row_6, 46
+    db TILE_QUESTION_COIN
+    SKY_TO row_6, 54
+    db TILE_STAIR
+    SKY_TO row_6, 57
+    db TILE_FLAG
+    SKY_TO row_6, MAP_COLUMNS
+
+row_7:
+    SKY_TO row_7, 8
+    times 3 db TILE_BRICK
+    SKY_TO row_7, 12
+    times 4 db TILE_COIN
+    SKY_TO row_7, 32
+    db TILE_PIPE_TOP_L, TILE_PIPE_TOP_R
+    SKY_TO row_7, 43
+    times 3 db TILE_BRICK
+    SKY_TO row_7, 53
+    times 2 db TILE_STAIR
+    SKY_TO row_7, 57
+    db TILE_FLAG
+    SKY_TO row_7, MAP_COLUMNS
+
+row_8:
+    SKY_TO row_8, 22
+    db TILE_PIPE_TOP_L, TILE_PIPE_TOP_R
+    SKY_TO row_8, 32
+    db TILE_PIPE_BODY_L, TILE_PIPE_BODY_R
+    SKY_TO row_8, 52
+    times 3 db TILE_STAIR
+    SKY_TO row_8, 57
+    db TILE_FLAG
+    SKY_TO row_8, MAP_COLUMNS
+
+row_9:
+    SKY_TO row_9, 22
+    db TILE_PIPE_BODY_L, TILE_PIPE_BODY_R
+    SKY_TO row_9, 32
+    db TILE_PIPE_BODY_L, TILE_PIPE_BODY_R
+    SKY_TO row_9, 51
+    times 4 db TILE_STAIR
+    SKY_TO row_9, 57
+    db TILE_STAIR
+    SKY_TO row_9, MAP_COLUMNS
+
+    ; Ground rows 10 and 11, with pits at 13–14 and 39–41.
+    %rep 2
+        times 13 db TILE_GROUND
+        times 2  db TILE_SKY
+        times 24 db TILE_GROUND
+        times 3  db TILE_SKY
+        times 18 db TILE_GROUND
+    %endrep
+
+working_map:
+    times MAP_BYTES db TILE_SKY
+
+; Spawn columns for the later enemy module.
+goomba_spawn_columns db 17, 19, 29, 47
+koopa_spawn_columns  db 27, 45
+
+; Data for the optional Module 2 palette preview.
 test_colors:
     db COLOR_SKY, COLOR_GROUND, COLOR_BRICK, COLOR_PIPE
     db COLOR_HERO, COLOR_ENEMY, COLOR_TEXT, COLOR_HUD
-TEST_COLOR_COUNT   equ $ - test_colors
+TEST_COLOR_COUNT equ $ - test_colors
 
-; Each entry contains x, y, width, and height.
 border_rectangles:
     dw 0, 0, SCREEN_WIDTH, 1
     dw 0, SCREEN_HEIGHT - 1, SCREEN_WIDTH, 1
     dw 0, 0, 1, SCREEN_HEIGHT
     dw SCREEN_WIDTH - 1, 0, 1, SCREEN_HEIGHT
-BORDER_COUNT       equ ($ - border_rectangles) / 8
+BORDER_COUNT equ ($ - border_rectangles) / 8
 
-; Module 3 tile codes
-TILE_SKY           equ 0
-TILE_GROUND        equ 1
-INVALID_TILE       equ 0FFFFh
-
-; Temporary map with ten sky rows and two ground rows.
-original_map:
-    times MAP_COLUMNS * (MAP_ROWS - 2) db TILE_SKY
-    times MAP_COLUMNS * 2 db TILE_GROUND
-
-; ResetMap will initialize this copy in the next step.
-working_map:
-    times MAP_BYTES db 0
-
-; Each test contains world pixel x and y.
+; World pixel coordinates for testing GetTile in AFD.
 tile_test_points:
-    dw 55, 147
-    dw 55, 160
-    dw 959, 191
-    dw 960, 160
-TILE_TEST_COUNT    equ ($ - tile_test_points) / 4
+    dw 55, 147, 55, 160, 959, 191, 960, 160
+    dw 208, 160, 80, 96, 352, 128, 912, 32
+TILE_TEST_COUNT equ ($ - tile_test_points) / 4
 
 tile_test_results:
     times TILE_TEST_COUNT dw 0
 
 start:
-    ; Select graphics mode and set up the data and video segments.
     mov ax, GRAPHICS_MODE
     int 10h
+
+    ; DS points to program data. ES points to VGA memory.
     push cs
     pop ds
     mov ax, VIDEO_SEGMENT
     mov es, ax
+
+    ; ResetMap(original_map, working_map)
     mov ax, working_map
     push ax
     mov ax, original_map
     push ax
     call ResetMap
 
-    ; Run the lookup tests and save each result for AFD.
+    ; Save the tile lookup results for inspection in AFD.
     mov si, tile_test_points
     mov di, tile_test_results
     mov cx, TILE_TEST_COUNT
 
 run_tile_test:
-    mov ax, original_map
+    mov ax, working_map
     push ax
-    push word [si+2]            ; World y
-    push word [si]              ; World x
+    push word [si+2]
+    push word [si]
     call GetTile
     mov [di], ax
-
-    add si, 4                   ; Next coordinate pair
-    add di, 2                   ; Next result word
+    add si, 4
+    add di, 2
     loop run_tile_test
 
 tile_tests_done:
-    ; FillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_GRAY)
-    mov ax, COLOR_GRAY
-    push ax
-    mov ax, SCREEN_HEIGHT
-    push ax
-    mov ax, SCREEN_WIDTH
-    push ax
-    xor ax, ax
-    push ax
-    push ax
-    call FillRect
+    xor bx, bx                 ; First preview starts at column 0.
 
-    ; Draw one rectangle per palette entry.
-    mov si, test_colors
-    mov bx, SWATCH_X
-    mov cx, TEST_COLOR_COUNT
-
-draw_swatch:
-    xor ax, ax
-    mov al, [si]
-    push ax
-    mov ax, SWATCH_HEIGHT
-    push ax
-    mov ax, SWATCH_WIDTH
-    push ax
-    mov ax, SWATCH_Y
-    push ax
-    push bx
-    call FillRect
-
-    inc si
-    add bx, SWATCH_STEP
-    loop draw_swatch
-
-    ; Draw the four edges of the white border.
-    mov si, border_rectangles
-    mov cx, BORDER_COUNT
-
-draw_border:
-    mov ax, COLOR_WHITE
-    push ax
-    push word [si+6]            ; Height
-    push word [si+4]            ; Width
-    push word [si+2]            ; Screen y
-    push word [si]              ; Screen x
-    call FillRect
-
-    add si, 8
-    loop draw_border
-
-    ; PutPixel(10, 2, COLOR_WHITE)
-    mov ax, COLOR_WHITE
-    push ax
-    mov ax, 2
-    push ax
-    mov ax, 10
-    push ax
-    call PutPixel
-
-    ; Keep the test picture visible until a key is pressed.
-    mov ah, 00h
-    int 16h
-        ; Set up the segments again after the BIOS keyboard call.
-    push cs
-    pop ds
-    mov ax, VIDEO_SEGMENT
-    mov es, ax
-
-    ; DrawMap(0, working_map)
+preview_map:
     mov ax, working_map
     push ax
-    xor ax, ax
-    push ax
+    push bx
     call DrawMap
 
-    ; Keep the map visible until the next keypress.
-    mov ah, 00h
-    int 16h
+read_preview_key:
+    call ReadKey
+    cmp ah, KEY_ESC
+    je exit_program
+    cmp ah, KEY_PAUSE
+    je preview_palette
+    cmp ah, KEY_ENTER
+    jne read_preview_key
+
+    add bx, VISIBLE_COLUMNS
+    cmp bx, LAST_COLUMN
+    jbe preview_map
+    xor bx, bx
+    jmp preview_map
+
+preview_palette:
+    call DrawPalette
+    call ReadKey
+    cmp ah, KEY_ESC
+    je exit_program
+    jmp preview_map
 
 exit_program:
     mov ax, TEXT_MODE
@@ -234,11 +288,35 @@ exit_program:
     mov ax, 4C00h
     int 21h
 
-; GetTile
-; Purpose: Read the tile at a world pixel coordinate.
-; Inputs: Stack words x, y, and map address in DS.
-; Outputs: AX = tile code or FFFFh for an invalid coordinate.
-; Registers changed: AX and flags.
+; ReadKey
+; Waits for a BIOS keystroke and returns ASCII in AL, scan code in AH.
+; Preserves the other registers used by the preview.
+ReadKey:
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    push bp
+    push ds
+    push es
+
+    mov ah, 00h
+    int 16h
+
+    pop es
+    pop ds
+    pop bp
+    pop di
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    ret
+
+; GetTile(x, y, map)
+; Inputs: World pixel coordinates and map offset in DS.
+; Output: AX = tile code, or FFFFh for an invalid coordinate.
 GetTile:
     push bp
     mov bp, sp
@@ -249,22 +327,20 @@ GetTile:
     mov bx, [bp+4]
     cmp bx, MAP_PIXEL_WIDTH
     jae .invalid
-
     mov ax, [bp+6]
     cmp ax, MAP_PIXEL_HEIGHT
     jae .invalid
 
-    ; Divide both pixel coordinates by 16.
+    ; Convert pixels to tile column and row.
     mov cl, TILE_SHIFT
-    shr bx, cl                  ; BX = tile column
-    shr ax, cl                  ; AX = tile row
+    shr bx, cl
+    shr ax, cl
 
-    ; Convert row and column to a byte address.
+    ; Index = row * 60 + column.
     mov cx, MAP_COLUMNS
-    mul cx                      ; DX:AX = row * 60
-    add bx, ax                  ; BX = row * 60 + column
-    add bx, [bp+8]              ; BX = map address + index
-
+    mul cx
+    add bx, ax
+    add bx, [bp+8]
     xor ax, ax
     mov al, [bx]
     jmp .done
@@ -279,11 +355,240 @@ GetTile:
     pop bp
     ret 6
 
-; PutPixel
-; Purpose: Draw one pixel inside the screen.
-; Inputs: Stack words x, y, and colour. ES is the drawing segment.
-; Outputs: Writes one byte for a valid coordinate.
-; Registers changed: Flags only on return.
+; ResetMap(source, destination)
+; Copies 720 bytes between two maps in DS. Preserves ES and flags.
+ResetMap:
+    push bp
+    mov bp, sp
+    pushf
+    push es
+    push si
+    push di
+    push cx
+
+    push ds
+    pop es
+    mov si, [bp+4]
+    mov di, [bp+6]
+    mov cx, MAP_BYTES
+    cld
+    rep movsb
+
+    pop cx
+    pop di
+    pop si
+    pop es
+    popf
+    pop bp
+    ret 4
+
+; DrawMap(first column, map)
+; Draws a 20-column window from the map in DS to the screen in ES.
+DrawMap:
+    push bp
+    mov bp, sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+
+    mov ax, [bp+4]
+    cmp ax, LAST_COLUMN
+    ja .done
+
+    ; Skip HUD row 0 and find the first tile in row 1.
+    mov si, [bp+6]
+    add si, ax
+    add si, MAP_COLUMNS
+
+    ; Clear the whole screen to black.
+    mov ax, COLOR_BLACK
+    push ax
+    mov ax, SCREEN_HEIGHT
+    push ax
+    mov ax, SCREEN_WIDTH
+    push ax
+    xor ax, ax
+    push ax
+    push ax
+    call FillRect
+
+    ; Paint the blue play area from y = 16 through y = 191.
+    mov ax, COLOR_SKY
+    push ax
+    mov ax, MAP_PIXEL_HEIGHT - TILE_SIZE
+    push ax
+    mov ax, SCREEN_WIDTH
+    push ax
+    mov ax, TILE_SIZE
+    push ax
+    xor ax, ax
+    push ax
+    call FillRect
+
+    mov dx, TILE_SIZE
+
+.next_row:
+    xor bx, bx
+    mov cx, VISIBLE_COLUMNS
+
+.next_tile:
+    xor ax, ax
+    mov al, [si]
+    push ax
+    push dx
+    push bx
+    call DrawTile
+
+    inc si
+    add bx, TILE_SIZE
+    loop .next_tile
+
+    ; SI already advanced 20 bytes. Skip the other 40.
+    add si, MAP_COLUMNS - VISIBLE_COLUMNS
+    add dx, TILE_SIZE
+    cmp dx, MAP_PIXEL_HEIGHT
+    jb .next_row
+
+.done:
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret 4
+
+; DrawTile(screen x, screen y, tile code)
+; Uses FillRect. Sky is already painted by DrawMap.
+DrawTile:
+    push bp
+    mov bp, sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+
+    mov bx, [bp+8]
+    cmp bx, TILE_COLOR_COUNT
+    jae .done
+    cmp bx, TILE_SKY
+    je .done
+
+    mov si, [bp+4]
+    mov dx, [bp+6]
+    mov cx, TILE_SIZE
+
+    xor ax, ax
+    mov al, [tile_colors+bx]
+    push ax                    ; Colour is pushed first.
+    mov ax, TILE_SIZE          ; Default height.
+
+    cmp bx, TILE_COIN
+    je .coin
+    cmp bx, TILE_FLAG
+    jne .draw
+
+    ; Draw a narrow pole in the middle of the tile.
+    add si, 7
+    mov cx, 2
+    jmp .draw
+
+.coin:
+    add si, 5
+    add dx, 4
+    mov cx, 6
+    mov ax, 8
+
+.draw:
+    push ax                    ; Height
+    push cx                    ; Width
+    push dx                    ; y
+    push si                    ; x
+    call FillRect
+
+.done:
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop bp
+    ret 6
+
+; DrawPalette
+; Displays the Module 2 palette, border, and white test pixel.
+DrawPalette:
+    push ax
+    push bx
+    push cx
+    push si
+
+    mov ax, COLOR_GRAY
+    push ax
+    mov ax, SCREEN_HEIGHT
+    push ax
+    mov ax, SCREEN_WIDTH
+    push ax
+    xor ax, ax
+    push ax
+    push ax
+    call FillRect
+
+    mov si, test_colors
+    mov bx, 20
+    mov cx, TEST_COLOR_COUNT
+
+.swatch:
+    xor ax, ax
+    mov al, [si]
+    push ax
+    mov ax, 32
+    push ax
+    mov ax, 28
+    push ax
+    mov ax, 60
+    push ax
+    push bx
+    call FillRect
+
+    inc si
+    add bx, 36
+    loop .swatch
+
+    mov si, border_rectangles
+    mov cx, BORDER_COUNT
+
+.border:
+    mov ax, COLOR_WHITE
+    push ax
+    push word [si+6]
+    push word [si+4]
+    push word [si+2]
+    push word [si]
+    call FillRect
+
+    add si, 8
+    loop .border
+
+    mov ax, COLOR_WHITE
+    push ax
+    mov ax, 2
+    push ax
+    mov ax, 10
+    push ax
+    call PutPixel
+
+    pop si
+    pop cx
+    pop bx
+    pop ax
+    ret
+
+; PutPixel(x, y, colour)
+; Writes one pixel to ES if the coordinates fit on screen.
 PutPixel:
     push bp
     mov bp, sp
@@ -295,12 +600,11 @@ PutPixel:
     mov bx, [bp+4]
     cmp bx, SCREEN_WIDTH
     jae .done
-
     mov ax, [bp+6]
     cmp ax, SCREEN_HEIGHT
     jae .done
 
-    ; DI = y * 256 + y * 64 + x
+    ; Pixel offset = y * 256 + y * 64 + x.
     mov di, ax
     mov cl, 8
     shl di, cl
@@ -320,12 +624,8 @@ PutPixel:
     pop bp
     ret 6
 
-; FillRect
-; Purpose: Fill a rectangle that fits entirely inside the screen.
-; Inputs: Stack words x, y, width, height, and colour.
-;         ES is the drawing segment.
-; Outputs: Draws valid rectangles. Skips empty or invalid rectangles.
-; Registers changed: None on return. Caller flags are restored.
+; FillRect(x, y, width, height, colour)
+; Fills a rectangle in ES. Skips empty and out-of-bounds rectangles.
 FillRect:
     push bp
     mov bp, sp
@@ -336,7 +636,6 @@ FillRect:
     push dx
     push di
 
-    ; Check x and the number of pixels available to its right.
     mov bx, [bp+4]
     cmp bx, SCREEN_WIDTH
     jae .done
@@ -347,7 +646,6 @@ FillRect:
     cmp cx, ax
     ja .done
 
-    ; Check y and the number of rows available below it.
     mov bx, [bp+6]
     cmp bx, SCREEN_HEIGHT
     jae .done
@@ -368,7 +666,7 @@ FillRect:
     add di, bx
     add di, [bp+4]
 
-    ; After filling a row, skip to the same x on the next row.
+    ; Advance to the same x after each row is filled.
     mov bx, SCREEN_WIDTH
     sub bx, [bp+8]
     mov ax, [bp+12]
@@ -391,134 +689,3 @@ FillRect:
     popf
     pop bp
     ret 10
-    ; ResetMap
-; Purpose: Restore the working map from the original map.
-; Inputs: Stack words source offset and destination offset, both in DS.
-; Outputs: Copies MAP_BYTES bytes to the destination.
-; Registers and flags: All preserved.
-ResetMap:
-    push bp
-    mov bp, sp
-    pushf
-    push es
-    push si
-    push di
-    push cx
-
-    ; REP MOVSB copies from DS:SI to ES:DI.
-    ; Both maps are in the program's data segment.
-    push ds
-    pop es
-
-    mov si, [bp+4]
-    mov di, [bp+6]
-    mov cx, MAP_BYTES
-    cld
-    rep movsb
-
-    pop cx
-    pop di
-    pop si
-    pop es
-    popf
-    pop bp
-    ret 4
-    ; DrawTile
-; Purpose: Draw one 16 by 16 tile using FillRect.
-; Inputs: Stack words screen x, screen y, and tile code.
-;         ES points to the drawing segment.
-; Outputs: Draws a sky or ground tile.
-; Registers changed: Flags only.
-DrawTile:
-    push bp
-    mov bp, sp
-    push ax
-
-    mov ax, COLOR_SKY
-    cmp word [bp+8], TILE_GROUND
-    jne .draw
-    mov ax, COLOR_GROUND
-
-.draw:
-    ; FillRect(x, y, TILE_SIZE, TILE_SIZE, colour)
-    push ax
-    mov ax, TILE_SIZE
-    push ax
-    push ax
-    push word [bp+6]
-    push word [bp+4]
-    call FillRect
-
-    pop ax
-    pop bp
-    ret 6
-
-; DrawMap
-; Purpose: Draw a tile-aligned window of the level.
-; Inputs: Stack words first map column and map offset in DS.
-;         ES points to the drawing segment.
-; Outputs: Draws 20 columns. Skips invalid starting columns.
-; Registers changed: Flags only.
-DrawMap:
-    push bp
-    mov bp, sp
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
-
-    mov ax, [bp+4]
-    cmp ax, MAP_COLUMNS - (SCREEN_WIDTH / TILE_SIZE)
-    ja .done
-
-    ; SI points to the first visible tile in map row 1.
-    ; The top 16 pixels are reserved for the HUD.
-    mov si, [bp+6]
-    add si, ax
-    add si, MAP_COLUMNS
-
-    ; Clear the preview so the HUD strip and bottom 8 pixels are black.
-    mov ax, COLOR_BLACK
-    push ax
-    mov ax, SCREEN_HEIGHT
-    push ax
-    mov ax, SCREEN_WIDTH
-    push ax
-    xor ax, ax
-    push ax
-    push ax
-    call FillRect
-
-    mov dx, TILE_SIZE           ; Screen y starts at 16.
-
-.next_row:
-    xor bx, bx                  ; Screen x starts at 0 on each row.
-    mov cx, SCREEN_WIDTH / TILE_SIZE
-
-.next_tile:
-    xor ax, ax
-    mov al, [si]                ; Read one tile code from the map.
-    push ax
-    push dx
-    push bx
-    call DrawTile
-
-    inc si
-    add bx, TILE_SIZE
-    loop .next_tile
-
-    ; SI already advanced 20 bytes. Skip the rest of this map row.
-    add si, MAP_COLUMNS - (SCREEN_WIDTH / TILE_SIZE)
-    add dx, TILE_SIZE
-    cmp dx, MAP_PIXEL_HEIGHT
-    jb .next_row
-
-.done:
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    pop bp
-    ret 4
