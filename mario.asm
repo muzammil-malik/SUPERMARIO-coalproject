@@ -211,6 +211,22 @@ draw_border:
     ; Keep the test picture visible until a key is pressed.
     mov ah, 00h
     int 16h
+        ; Set up the segments again after the BIOS keyboard call.
+    push cs
+    pop ds
+    mov ax, VIDEO_SEGMENT
+    mov es, ax
+
+    ; DrawMap(0, working_map)
+    mov ax, working_map
+    push ax
+    xor ax, ax
+    push ax
+    call DrawMap
+
+    ; Keep the map visible until the next keypress.
+    mov ah, 00h
+    int 16h
 
 exit_program:
     mov ax, TEXT_MODE
@@ -405,5 +421,104 @@ ResetMap:
     pop si
     pop es
     popf
+    pop bp
+    ret 4
+    ; DrawTile
+; Purpose: Draw one 16 by 16 tile using FillRect.
+; Inputs: Stack words screen x, screen y, and tile code.
+;         ES points to the drawing segment.
+; Outputs: Draws a sky or ground tile.
+; Registers changed: Flags only.
+DrawTile:
+    push bp
+    mov bp, sp
+    push ax
+
+    mov ax, COLOR_SKY
+    cmp word [bp+8], TILE_GROUND
+    jne .draw
+    mov ax, COLOR_GROUND
+
+.draw:
+    ; FillRect(x, y, TILE_SIZE, TILE_SIZE, colour)
+    push ax
+    mov ax, TILE_SIZE
+    push ax
+    push ax
+    push word [bp+6]
+    push word [bp+4]
+    call FillRect
+
+    pop ax
+    pop bp
+    ret 6
+
+; DrawMap
+; Purpose: Draw a tile-aligned window of the level.
+; Inputs: Stack words first map column and map offset in DS.
+;         ES points to the drawing segment.
+; Outputs: Draws 20 columns. Skips invalid starting columns.
+; Registers changed: Flags only.
+DrawMap:
+    push bp
+    mov bp, sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+
+    mov ax, [bp+4]
+    cmp ax, MAP_COLUMNS - (SCREEN_WIDTH / TILE_SIZE)
+    ja .done
+
+    ; SI points to the first visible tile in map row 1.
+    ; The top 16 pixels are reserved for the HUD.
+    mov si, [bp+6]
+    add si, ax
+    add si, MAP_COLUMNS
+
+    ; Clear the preview so the HUD strip and bottom 8 pixels are black.
+    mov ax, COLOR_BLACK
+    push ax
+    mov ax, SCREEN_HEIGHT
+    push ax
+    mov ax, SCREEN_WIDTH
+    push ax
+    xor ax, ax
+    push ax
+    push ax
+    call FillRect
+
+    mov dx, TILE_SIZE           ; Screen y starts at 16.
+
+.next_row:
+    xor bx, bx                  ; Screen x starts at 0 on each row.
+    mov cx, SCREEN_WIDTH / TILE_SIZE
+
+.next_tile:
+    xor ax, ax
+    mov al, [si]                ; Read one tile code from the map.
+    push ax
+    push dx
+    push bx
+    call DrawTile
+
+    inc si
+    add bx, TILE_SIZE
+    loop .next_tile
+
+    ; SI already advanced 20 bytes. Skip the rest of this map row.
+    add si, MAP_COLUMNS - (SCREEN_WIDTH / TILE_SIZE)
+    add dx, TILE_SIZE
+    cmp dx, MAP_PIXEL_HEIGHT
+    jb .next_row
+
+.done:
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    pop ax
     pop bp
     ret 4
