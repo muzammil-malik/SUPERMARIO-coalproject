@@ -125,6 +125,11 @@ start:
     pop ds
     mov ax, VIDEO_SEGMENT
     mov es, ax
+    mov ax, working_map
+    push ax
+    mov ax, original_map
+    push ax
+    call ResetMap
 
     ; Run the lookup tests and save each result for AFD.
     mov si, tile_test_points
@@ -370,3 +375,35 @@ FillRect:
     popf
     pop bp
     ret 10
+    ; ResetMap
+; Purpose: Restore the working map from the original map.
+; Inputs: Stack words source offset and destination offset, both in DS.
+; Outputs: Copies MAP_BYTES bytes to the destination.
+; Registers and flags: All preserved.
+ResetMap:
+    push bp
+    mov bp, sp
+    pushf
+    push es
+    push si
+    push di
+    push cx
+
+    ; REP MOVSB copies from DS:SI to ES:DI.
+    ; Both maps are in the program's data segment.
+    push ds
+    pop es
+
+    mov si, [bp+4]
+    mov di, [bp+6]
+    mov cx, MAP_BYTES
+    cld
+    rep movsb
+
+    pop cx
+    pop di
+    pop si
+    pop es
+    popf
+    pop bp
+    ret 4
