@@ -15,6 +15,10 @@ START_LIVES equ 3
 START_TIME equ 300
 START_HP equ 1
 
+FRAME_BYTES equ SCREEN_WIDTH * SCREEN_HEIGHT
+frame_segment dw 0
+buffer_error_text db 'Unable to allocate the video frame buffer.', 13, 10, '$'
+
 player_x dw 32
 player_lives db START_LIVES
 player_hp db START_HP
@@ -353,11 +357,32 @@ coin_sprite:
     db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 
 start:
+    ; Move the stack into memory retained by DOS resize.
+    mov ax, cs
+    cli
+    mov ss, ax
+    mov sp, stack_top
+    sti
+    mov ds, ax
+    mov es, ax
+    mov bx, (stack_top - $$ + 100h + 15) / 16
+    mov ah, 4Ah
+    int 21h
+    jnc .resized
+    jmp buffer_error
+.resized:
+
+    mov bx, FRAME_BYTES / 16
+    mov ah, 48h
+    int 21h
+    jnc .allocated
+    jmp buffer_error
+.allocated:
+    mov [frame_segment], ax
+
     mov ax, 0013h
     int 10h
-    push cs
-    pop ds
-    mov ax, 0A000h
+    mov ax, [frame_segment]
     mov es, ax
     mov ax, working_map
     push ax
@@ -385,6 +410,7 @@ preview_map:
     push bx
     call DrawMap
     call DrawSpritePreview
+    call PresentFrame
 
 read_preview_key:
     call ReadKey
@@ -405,16 +431,60 @@ redraw_map:
 
 preview_palette:
     call DrawPalette
+    call PresentFrame
     call ReadKey
     cmp ah, 01h
     je exit_program
     jmp preview_map
 
 exit_program:
+    mov ax, [frame_segment]
+    mov es, ax
+    mov ah, 49h
+    int 21h
     mov ax, 0003h
     int 10h
     mov ax, 4C00h
     int 21h
+
+; PresentFrame()
+; Copies the complete frame from RAM to VGA. Preserves registers and flags.
+PresentFrame:
+    pushf
+    push ax
+    push cx
+    push si
+    push di
+    push ds
+    push es
+
+    mov ax, [frame_segment]
+    mov ds, ax
+    mov ax, 0A000h
+    mov es, ax
+    xor si, si
+    xor di, di
+    mov cx, FRAME_BYTES / 2
+    cld
+    rep movsw
+
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop cx
+    pop ax
+    popf
+    ret
+
+buffer_error:
+    mov dx, buffer_error_text
+    mov ah, 09h
+    int 21h
+    mov ax, 4C01h
+    int 21h
+
+
 
 ; BIOS preview input. AH returns the scan code.
 ReadKey:
@@ -877,3 +947,8 @@ FillRect:
     popf
     pop bp
     ret 10
+
+; The stack must remain inside the resized DOS memory block.
+align 2
+times 1024 db 0
+stack_top:
