@@ -71,6 +71,15 @@ test_sprite:
     db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
     db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
 
+tall_test_sprite:
+    times 16 db 14
+    %rep 30
+        db 14
+        times 14 db 0
+        db 15
+    %endrep
+    times 16 db 15
+
 start:
     mov ax, 0013h
     int 10h
@@ -170,6 +179,18 @@ preview_map:
     push ax
     call DrawSprite
 
+    xor ax, ax
+    push ax
+    mov ax, 32
+    push ax
+    mov ax, tall_test_sprite
+    push ax
+    mov ax, 48
+    push ax
+    mov ax, 144
+    push ax
+    call DrawSprite
+
 read_preview_key:
     call ReadKey
     cmp ah, 01h
@@ -224,8 +245,10 @@ DrawSprite:
     push di
     mov si, [bp+8]
     mov dx, [bp+6]
-    mov di, 16
-    cmp word [bp+10], di
+    mov di, [bp+10]
+    cmp di, 16
+    je .row
+    cmp di, 32
     jne .done
 .row:
     mov bx, [bp+4]
