@@ -103,11 +103,70 @@ preview_map:
     push ax
     push bx
     call DrawMap
+    mov ax, 0
+    push ax
+    mov ax, 16
+    push ax
     mov ax, test_sprite
     push ax
     mov ax, 48
     push ax
     mov ax, 32
+    push ax
+    call DrawSprite
+    mov ax, 1
+    push ax
+    mov ax, 16
+    push ax
+    mov ax, test_sprite
+    push ax
+    mov ax, 48
+    push ax
+    mov ax, 64
+    push ax
+    call DrawSprite
+    mov ax, 0
+    push ax
+    mov ax, 16
+    push ax
+    mov ax, test_sprite
+    push ax
+    mov ax, 64
+    push ax
+    mov ax, -8
+    push ax
+    call DrawSprite
+    mov ax, 0
+    push ax
+    mov ax, 16
+    push ax
+    mov ax, test_sprite
+    push ax
+    mov ax, 64
+    push ax
+    mov ax, 312
+    push ax
+    call DrawSprite
+    mov ax, 0
+    push ax
+    mov ax, 16
+    push ax
+    mov ax, test_sprite
+    push ax
+    mov ax, -7
+    push ax
+    mov ax, 120
+    push ax
+    call DrawSprite
+    mov ax, 0
+    push ax
+    mov ax, 16
+    push ax
+    mov ax, test_sprite
+    push ax
+    mov ax, 193
+    push ax
+    mov ax, 120
     push ax
     call DrawSprite
 
@@ -151,8 +210,9 @@ ReadKey:
     pop bx
     ret
 
-; DrawSprite(x, y, bitmap)
+; DrawSprite(x, y, bitmap, height, flags)
 ; DS holds the bitmap. ES is the destination. Colour zero is transparent.
+; Flags bit 0 mirrors the image. PutPixel clips each visible pixel.
 DrawSprite:
     push bp
     mov bp, sp
@@ -165,8 +225,14 @@ DrawSprite:
     mov si, [bp+8]
     mov dx, [bp+6]
     mov di, 16
+    cmp word [bp+10], di
+    jne .done
 .row:
     mov bx, [bp+4]
+    test word [bp+12], 1
+    jz .row_start
+    add bx, 15
+.row_start:
     mov cx, 16
 .pixel:
     xor ax, ax
@@ -179,7 +245,13 @@ DrawSprite:
     call PutPixel
 .advance:
     inc si
+    test word [bp+12], 1
+    jnz .left
     inc bx
+    jmp .count
+.left:
+    dec bx
+.count:
     loop .pixel
     inc dx
     dec di
@@ -192,7 +264,7 @@ DrawSprite:
     pop bx
     pop ax
     pop bp
-    ret 6
+    ret 10
 
 ; Copy source to destination. Both offsets are in DS.
 ResetMap:
