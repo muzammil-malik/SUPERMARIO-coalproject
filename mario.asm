@@ -113,11 +113,15 @@ HERO_START_X    equ 32
 HERO_MAX_X      equ WORLD_WIDTH - TILE_SIZE
 camera_x        dw 0
 hero_preview_dx dw 0
+hero_preview_y  dw 24
+hero_preview_flags dw 0
+camera_paused   db 0
 FRAME_WORDS    equ SCREEN_WIDTH * SCREEN_HEIGHT / 2
 FRAME_PARAS    equ SCREEN_WIDTH * SCREEN_HEIGHT / 16
 PAGE_MAP       equ 0
 PAGE_SPRITES   equ 1
 PAGE_PALETTE   equ 2
+PAGE_BUFFER_DEMO equ 3
 frame_segment  dw 0
 last_tick      dw 0
 preview_phase  dw 0
@@ -467,6 +471,7 @@ Start:
     pop  ds
 
     call ResetMap
+    call ResetCamera
     push word [frame_segment]
     call RunBufferedPreview
     jmp  ExitToDOS
@@ -766,7 +771,7 @@ DrawTile:
     push dx
     push word [bp+6]
     push word [bp+4]
-    call FillRect
+    call FillTileRect
 
     cmp  bx, TILE_COIN
     je   .detail
@@ -797,7 +802,7 @@ DrawTile:
     mov  ax, [bp+4]
     add  ax, 6
     push ax
-    call FillRect
+    call FillTileRect
     jmp  .done
 .pole:
     mov  ax, COLOR_TEXT
@@ -809,7 +814,7 @@ DrawTile:
     mov  ax, [bp+4]
     add  ax, 7
     push ax
-    call FillRect
+    call FillTileRect
 .done:
     pop  dx
     pop  bx
@@ -817,9 +822,47 @@ DrawTile:
     pop  bp
     ret  6
 
-; DrawMap(first_column)
-; Inputs: first world column at [bp+4], ES = target.
-; Outputs: a 20-column window with fixed HUD and black bottom strip.
+; FillTileRect(x, y, width, height, color)
+; Inputs: five stack words and ES target. Clips horizontal tile edges.
+; Outputs: visible part drawn via FillRect. Changes: flags only.
+FillTileRect:
+    push bp
+    mov  bp, sp
+    push ax
+    push bx
+    push cx
+    mov  bx, [bp+4]
+    mov  cx, [bp+8]
+    or   bx, bx
+    jns  .right
+    add  cx, bx                 ; discard columns left of the viewport
+    jle  .done
+    xor  bx, bx
+.right:
+    cmp  bx, SCREEN_WIDTH
+    jae  .done
+    mov  ax, SCREEN_WIDTH
+    sub  ax, bx
+    cmp  cx, ax
+    jbe  .draw
+    mov  cx, ax
+.draw:
+    push word [bp+12]
+    push word [bp+10]
+    push cx
+    push word [bp+6]
+    push bx
+    call FillRect
+.done:
+    pop  cx
+    pop  bx
+    pop  ax
+    pop  bp
+    ret  10
+
+; DrawMap(camera_pixels)
+; Inputs: camera position in pixels at [bp+4], ES = target.
+; Outputs: tile window, fixed HUD band and black bottom strip.
 ; Changes: flags only.
 DrawMap:
     push bp
@@ -829,35 +872,55 @@ DrawMap:
     push cx
     push dx
     push si
+    push di
 
     mov  si, [bp+4]
-    cmp  si, LAST_WINDOW
-    ja   .done
-    xor  dx, dx               ; screen y
+    cmp  si, MAX_CAMERA_X
+    jbe  .valid_view
+    jmp  near .done
+.valid_view:
+    mov  di, si
+    and  di, TILE_SIZE - 1
+    neg  di                     ; screen x of first tile, possibly negative
+    mov  cl, 4
+    shr  si, cl                  ; world column of first tile
+
+    xor  ax, ax
+    mov  al, [tile_colors+TILE_HUD]
+    push ax
+    mov  ax, TILE_SIZE
+    push ax
+    mov  ax, SCREEN_WIDTH
+    push ax
+    xor  ax, ax
+    push ax
+    push ax
+    call FillRect
+
+    add  si, LEVEL_COLUMNS       ; row 0 is the fixed HUD
+    mov  dx, TILE_SIZE
 .row:
-    xor  bx, bx               ; screen x
-    mov  cx, VISIBLE_COLS
+    push si                      ; remember the first tile of this row
+    mov  bx, di
 .column:
     xor  ax, ax
     mov  al, [working_map+si]
-    or   dx, dx
-    jnz  .draw
-    mov  ax, TILE_HUD
-.draw:
     push ax
     push dx
     push bx
     call DrawTile
     inc  si
     add  bx, TILE_SIZE
-    loop .column
-    add  si, LEVEL_COLUMNS - VISIBLE_COLS
+    cmp  bx, SCREEN_WIDTH
+    jl   .column
+    pop  si
+    add  si, LEVEL_COLUMNS
     add  dx, TILE_SIZE
     cmp  dx, LEVEL_ROWS * TILE_SIZE
     jb   .row
 
     xor  ax, ax
-    push ax                   ; black
+    push ax
     mov  ax, SCREEN_HEIGHT - LEVEL_ROWS * TILE_SIZE
     push ax
     mov  ax, SCREEN_WIDTH
@@ -867,6 +930,7 @@ DrawMap:
     push ax
     call FillRect
 .done:
+    pop  di
     pop  si
     pop  dx
     pop  cx
@@ -934,8 +998,8 @@ DrawSprite:
     pop  bp
     ret  8
 
-; DrawPreviewEnemies(first_column)
-; Inputs: first visible map column at [bp+4], DS project data, ES target.
+; DrawPreviewEnemies(camera_pixels)
+; Inputs: camera position in pixels at [bp+4], DS project data, ES target.
 ; Outputs: draws static enemy starts. Changes: flags only.
 DrawPreviewEnemies:
     push bp
@@ -947,8 +1011,6 @@ DrawPreviewEnemies:
     push si
 
     mov  bx, [bp+4]
-    mov  cl, 4
-    shl  bx, cl                  ; scroll origin in whole pixels
     mov  si, enemy_starts
     mov  cx, ENEMY_START_COUNT
 .enemy:
@@ -1057,7 +1119,9 @@ UpdateSpritePreview:
     cmp  ah, KEY_UP
     je   .up
     cmp  ah, KEY_DOWN
-    je   .down
+    jne  .letter
+    jmp  near .down
+.letter:
     or   al, 20h
     cmp  al, 'm'
     jne  .check_blink
@@ -1196,6 +1260,7 @@ RunBufferedPreview:
     push bp
     mov  bp, sp
     push ax
+    push cx
     push es
     mov  es, [bp+4]
 .frame:
@@ -1203,6 +1268,7 @@ RunBufferedPreview:
     call WaitForPreviewTick
     mov  [last_tick], ax
     xor  word [preview_phase], 1
+    mov  word [hero_preview_dx], 0
 
     mov  ah, 01h
     int  16h
@@ -1225,14 +1291,33 @@ RunBufferedPreview:
     jmp  .present
 .try_sprites:
     cmp  byte [preview_page], PAGE_SPRITES
-    jne  .map
+    jne  .choose_map
     push word [preview_phase]
     call DrawSpriteGallery
     jmp  .present
-.map:
-    push word [preview_column]
+.choose_map:
+    cmp  byte [preview_page], PAGE_BUFFER_DEMO
+    je   .buffer_demo
+    cmp  byte [camera_paused], 0
+    jne  .draw_world
+    mov  ax, [hero_world_x]
+    add  ax, [hero_preview_dx]
+    push ax
+    call UpdateCamera
+.draw_world:
+    push word [camera_x]
     call DrawMap
-    push word [preview_column]
+    push word [camera_x]
+    call DrawPreviewEnemies
+    call DrawCameraHero
+    jmp  .present
+.buffer_demo:
+    mov  ax, [preview_column]
+    mov  cl, 4
+    shl  ax, cl
+    push ax
+    call DrawMap
+    push ax
     call DrawPreviewEnemies
 
     ; Animate an original pose across the sky above the obstacles.
@@ -1254,13 +1339,36 @@ RunBufferedPreview:
     jmp  .frame
 .done:
     pop  es
+    pop  cx
     pop  ax
     pop  bp
     ret  2
 
+; DrawCameraHero
+; Inputs: ES target, current hero and camera state.
+; Outputs: hero drawn at world x minus camera x. Changes: flags only.
+DrawCameraHero:
+    push ax
+    push bx
+    mov  ax, [hero_world_x]
+    sub  ax, [camera_x]
+    mov  bx, SpriteSmallStand
+    cmp  word [hero_preview_dx], 0
+    je   .draw
+    mov  bx, SpriteSmallRun
+.draw:
+    push word [hero_preview_flags]
+    push bx
+    push word [hero_preview_y]
+    push ax
+    call DrawSprite
+    pop  bx
+    pop  ax
+    ret
+
 ; HandlePreviewKey(key)
-; Input: BIOS key word at [bp+4].
-; Outputs: page, map window or preview state updated. Changes: flags.
+; Input: BIOS key word at [bp+4]. Outputs: selected preview and its state.
+; Changes: flags only.
 HandlePreviewKey:
     push bp
     mov  bp, sp
@@ -1268,36 +1376,73 @@ HandlePreviewKey:
     mov  ax, [bp+4]
     or   al, 20h
     cmp  al, 'p'
-    je   .palette
+    jne  .check_sprites
+    mov  byte [preview_page], PAGE_PALETTE
+    jmp  near .done
+.check_sprites:
     cmp  al, 's'
-    je   .sprites
+    jne  .check_world
+    mov  byte [preview_page], PAGE_SPRITES
+    jmp  .done
+.check_world:
     cmp  al, 'l'
-    je   .map
+    jne  .check_demo
+    mov  byte [preview_page], PAGE_MAP
+    jmp  .done
+.check_demo:
+    cmp  al, 'v'
+    jne  .dispatch
+    mov  byte [preview_page], PAGE_BUFFER_DEMO
+    jmp  .done
+.dispatch:
+    cmp  byte [preview_page], PAGE_PALETTE
+    je   .done
     cmp  byte [preview_page], PAGE_SPRITES
-    jne  .map_keys
+    jne  .map_key
     push word [bp+4]
     call UpdateSpritePreview
     jmp  .done
-.palette:
-    mov  byte [preview_page], PAGE_PALETTE
-    jmp  .done
-.sprites:
-    mov  byte [preview_page], PAGE_SPRITES
-    jmp  .done
-.map:
-    mov  byte [preview_page], PAGE_MAP
-    jmp  .done
-.map_keys:
-    cmp  byte [preview_page], PAGE_MAP
-    jne  .done
-    cmp  ah, KEY_LEFT
-    je   .left
-    cmp  ah, KEY_RIGHT
-    je   .right
+.map_key:
     cmp  al, 'r'
-    je   .reset
+    jne  .check_edit
+    call ResetMap
+    call ResetCamera
+    mov  word [preview_column], 0
+    jmp  .done
+.check_edit:
     cmp  al, 't'
+    jne  .movement
+    call EmptyPreviewBox
+    jmp  .done
+.movement:
+    cmp  byte [preview_page], PAGE_BUFFER_DEMO
+    jne  .camera_keys
+    cmp  ah, KEY_LEFT
+    jne  .demo_right
+    cmp  word [preview_column], 0
+    je   .done
+    dec  word [preview_column]
+    jmp  .done
+.demo_right:
+    cmp  ah, KEY_RIGHT
     jne  .done
+    cmp  word [preview_column], LAST_WINDOW
+    je   .done
+    inc  word [preview_column]
+    jmp  .done
+.camera_keys:
+    push ax
+    call UpdateCameraPreview
+.done:
+    pop  ax
+    pop  bp
+    ret  2
+
+; EmptyPreviewBox
+; Inputs: DS project segment. Outputs: preview mushroom box emptied.
+; Changes: flags only.
+EmptyPreviewBox:
+    push ax
     mov  ax, 7 * TILE_SIZE
     push ax
     mov  ax, 5 * TILE_SIZE
@@ -1306,21 +1451,69 @@ HandlePreviewKey:
     cmp  ax, TILE_POWER_BOX
     jne  .done
     mov  byte [working_map+7*LEVEL_COLUMNS+5], TILE_EMPTY_BOX
-    jmp  .first
+.done:
+    pop  ax
+    ret
+
+; UpdateCameraPreview(key)
+; Input: BIOS key word at [bp+4]. Outputs: preview movement or pause.
+; Changes: flags only. Vertical preview movement leaves the camera alone.
+UpdateCameraPreview:
+    push bp
+    mov  bp, sp
+    push ax
+    mov  ax, [bp+4]
+    cmp  al, ' '
+    jne  .check_pause
+    xor  byte [camera_paused], 1
+    jmp  .done
+.check_pause:
+    cmp  byte [camera_paused], 0
+    je   .active
+    jmp  near .done
+.active:
+    cmp  al, 'a'
+    je   .left
+    cmp  al, 'd'
+    je   .right
+    cmp  al, ','
+    je   .fine_left
+    cmp  al, '.'
+    je   .fine_right
+    cmp  ah, KEY_LEFT
+    je   .left
+    cmp  ah, KEY_RIGHT
+    je   .right
+    cmp  ah, KEY_UP
+    je   .up
+    cmp  ah, KEY_DOWN
+    jne  .done
+    cmp  word [hero_preview_y], 128
+    jae  .done
+    add  word [hero_preview_y], 4
+    jmp  .done
+.up:
+    cmp  word [hero_preview_y], 20
+    jbe  .done
+    sub  word [hero_preview_y], 4
+    jmp  .done
 .left:
-    cmp  word [preview_column], 0
-    je   .done
-    dec  word [preview_column]
-    jmp  .done
+    mov  ax, -4
+    jmp  .set_left
+.fine_left:
+    mov  ax, -1
+.set_left:
+    mov  word [hero_preview_flags], SPRITE_MIRROR
+    jmp  .set_step
 .right:
-    cmp  word [preview_column], LAST_WINDOW
-    je   .done
-    inc  word [preview_column]
-    jmp  .done
-.reset:
-    call ResetMap
-.first:
-    mov  word [preview_column], 0
+    mov  ax, 4
+    jmp  .set_right
+.fine_right:
+    mov  ax, 1
+.set_right:
+    mov  word [hero_preview_flags], 0
+.set_step:
+    mov  [hero_preview_dx], ax
 .done:
     pop  ax
     pop  bp
@@ -1333,6 +1526,9 @@ ResetCamera:
     mov  word [camera_x], 0
     mov  word [hero_world_x], HERO_START_X
     mov  word [hero_preview_dx], 0
+    mov  word [hero_preview_y], 24
+    mov  word [hero_preview_flags], 0
+    mov  byte [camera_paused], 0
     ret
 
 ; UpdateCamera(proposed_x)
