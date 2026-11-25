@@ -1438,7 +1438,7 @@ HandlePreviewKey:
     pop  bp
     ret  2
 
-; EmptyPreviewBox
+; Empty Preview Box
 ; Inputs: DS project segment. Outputs: preview mushroom box emptied.
 ; Changes: flags only.
 EmptyPreviewBox:
@@ -1454,7 +1454,6 @@ EmptyPreviewBox:
 .done:
     pop  ax
     ret
-
 ; UpdateCameraPreview(key)
 ; Input: BIOS key word at [bp+4]. Outputs: preview movement or pause.
 ; Changes: flags only. Vertical preview movement leaves the camera alone.
@@ -1518,7 +1517,6 @@ UpdateCameraPreview:
     pop  ax
     pop  bp
     ret  2
-
 ; ResetCamera
 ; Restores the starting view and hero position for new lives and games.
 ; Inputs: none. Outputs: camera and hero preview state. Changes: none.
@@ -1539,7 +1537,6 @@ UpdateCamera:
     push bp
     mov  bp, sp
     push ax
-
     mov  ax, [bp+4]
     cmp  ax, [camera_x]
     jle  .left_wall
