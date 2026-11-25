@@ -766,7 +766,7 @@ DrawTile:
     push dx
     push word [bp+6]
     push word [bp+4]
-    call FillRect
+    call FillTileRect
 
     cmp  bx, TILE_COIN
     je   .detail
@@ -797,7 +797,7 @@ DrawTile:
     mov  ax, [bp+4]
     add  ax, 6
     push ax
-    call FillRect
+    call FillTileRect
     jmp  .done
 .pole:
     mov  ax, COLOR_TEXT
@@ -809,7 +809,7 @@ DrawTile:
     mov  ax, [bp+4]
     add  ax, 7
     push ax
-    call FillRect
+    call FillTileRect
 .done:
     pop  dx
     pop  bx
@@ -817,9 +817,47 @@ DrawTile:
     pop  bp
     ret  6
 
-; DrawMap(first_column)
-; Inputs: first world column at [bp+4], ES = target.
-; Outputs: a 20-column window with fixed HUD and black bottom strip.
+; FillTileRect(x, y, width, height, color)
+; Inputs: five stack words and ES target. Clips horizontal tile edges.
+; Outputs: visible part drawn via FillRect. Changes: flags only.
+FillTileRect:
+    push bp
+    mov  bp, sp
+    push ax
+    push bx
+    push cx
+    mov  bx, [bp+4]
+    mov  cx, [bp+8]
+    or   bx, bx
+    jns  .right
+    add  cx, bx                 ; discard columns left of the viewport
+    jle  .done
+    xor  bx, bx
+.right:
+    cmp  bx, SCREEN_WIDTH
+    jae  .done
+    mov  ax, SCREEN_WIDTH
+    sub  ax, bx
+    cmp  cx, ax
+    jbe  .draw
+    mov  cx, ax
+.draw:
+    push word [bp+12]
+    push word [bp+10]
+    push cx
+    push word [bp+6]
+    push bx
+    call FillRect
+.done:
+    pop  cx
+    pop  bx
+    pop  ax
+    pop  bp
+    ret  10
+
+; DrawMap(camera_pixels)
+; Inputs: camera position in pixels at [bp+4], ES = target.
+; Outputs: tile window, fixed HUD band and black bottom strip.
 ; Changes: flags only.
 DrawMap:
     push bp
@@ -829,35 +867,55 @@ DrawMap:
     push cx
     push dx
     push si
+    push di
 
     mov  si, [bp+4]
-    cmp  si, LAST_WINDOW
-    ja   .done
-    xor  dx, dx               ; screen y
+    cmp  si, MAX_CAMERA_X
+    jbe  .valid_view
+    jmp  near .done
+.valid_view:
+    mov  di, si
+    and  di, TILE_SIZE - 1
+    neg  di                     ; screen x of first tile, possibly negative
+    mov  cl, 4
+    shr  si, cl                  ; world column of first tile
+
+    xor  ax, ax
+    mov  al, [tile_colors+TILE_HUD]
+    push ax
+    mov  ax, TILE_SIZE
+    push ax
+    mov  ax, SCREEN_WIDTH
+    push ax
+    xor  ax, ax
+    push ax
+    push ax
+    call FillRect
+
+    add  si, LEVEL_COLUMNS       ; row 0 is the fixed HUD
+    mov  dx, TILE_SIZE
 .row:
-    xor  bx, bx               ; screen x
-    mov  cx, VISIBLE_COLS
+    push si                      ; remember the first tile of this row
+    mov  bx, di
 .column:
     xor  ax, ax
     mov  al, [working_map+si]
-    or   dx, dx
-    jnz  .draw
-    mov  ax, TILE_HUD
-.draw:
     push ax
     push dx
     push bx
     call DrawTile
     inc  si
     add  bx, TILE_SIZE
-    loop .column
-    add  si, LEVEL_COLUMNS - VISIBLE_COLS
+    cmp  bx, SCREEN_WIDTH
+    jl   .column
+    pop  si
+    add  si, LEVEL_COLUMNS
     add  dx, TILE_SIZE
     cmp  dx, LEVEL_ROWS * TILE_SIZE
     jb   .row
 
     xor  ax, ax
-    push ax                   ; black
+    push ax
     mov  ax, SCREEN_HEIGHT - LEVEL_ROWS * TILE_SIZE
     push ax
     mov  ax, SCREEN_WIDTH
@@ -867,6 +925,7 @@ DrawMap:
     push ax
     call FillRect
 .done:
+    pop  di
     pop  si
     pop  dx
     pop  cx
@@ -934,8 +993,8 @@ DrawSprite:
     pop  bp
     ret  8
 
-; DrawPreviewEnemies(first_column)
-; Inputs: first visible map column at [bp+4], DS project data, ES target.
+; DrawPreviewEnemies(camera_pixels)
+; Inputs: camera position in pixels at [bp+4], DS project data, ES target.
 ; Outputs: draws static enemy starts. Changes: flags only.
 DrawPreviewEnemies:
     push bp
@@ -947,8 +1006,6 @@ DrawPreviewEnemies:
     push si
 
     mov  bx, [bp+4]
-    mov  cl, 4
-    shl  bx, cl                  ; scroll origin in whole pixels
     mov  si, enemy_starts
     mov  cx, ENEMY_START_COUNT
 .enemy:
@@ -1196,6 +1253,7 @@ RunBufferedPreview:
     push bp
     mov  bp, sp
     push ax
+    push cx
     push es
     mov  es, [bp+4]
 .frame:
@@ -1230,9 +1288,12 @@ RunBufferedPreview:
     call DrawSpriteGallery
     jmp  .present
 .map:
-    push word [preview_column]
+    mov  ax, [preview_column]
+    mov  cl, 4
+    shl  ax, cl
+    push ax
     call DrawMap
-    push word [preview_column]
+    push ax
     call DrawPreviewEnemies
 
     ; Animate an original pose across the sky above the obstacles.
@@ -1254,6 +1315,7 @@ RunBufferedPreview:
     jmp  .frame
 .done:
     pop  es
+    pop  cx
     pop  ax
     pop  bp
     ret  2
