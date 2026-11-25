@@ -58,7 +58,7 @@ LIFE_LOST_SECONDS equ 2
     jmp Start
 
 ; Hero.
-hero_x_pixels   dw 32
+hero_world_x   dw 32
 hero_hp         db SMALL_HP
 
 ; Enemies.
@@ -107,6 +107,12 @@ tile_colors db COLOR_SKY, COLOR_GROUND, COLOR_BRICK
             db 14, 13, 8, COLOR_PIPE, COLOR_PIPE, COLOR_PIPE, COLOR_PIPE
             db 6, 14, 15, COLOR_HUD
 preview_column dw 0
+
+; Whole-pixel camera state. Module 9 can supply the integer part of x.
+HERO_START_X    equ 32
+HERO_MAX_X      equ WORLD_WIDTH - TILE_SIZE
+camera_x        dw 0
+hero_preview_dx dw 0
 FRAME_WORDS    equ SCREEN_WIDTH * SCREEN_HEIGHT / 2
 FRAME_PARAS    equ SCREEN_WIDTH * SCREEN_HEIGHT / 16
 PAGE_MAP       equ 0
@@ -1315,6 +1321,51 @@ HandlePreviewKey:
     call ResetMap
 .first:
     mov  word [preview_column], 0
+.done:
+    pop  ax
+    pop  bp
+    ret  2
+
+; ResetCamera
+; Restores the starting view and hero position for new lives and games.
+; Inputs: none. Outputs: camera and hero preview state. Changes: none.
+ResetCamera:
+    mov  word [camera_x], 0
+    mov  word [hero_world_x], HERO_START_X
+    mov  word [hero_preview_dx], 0
+    ret
+
+; UpdateCamera(proposed_x)
+; Input: signed whole-pixel hero x at [bp+4], after horizontal movement.
+; Outputs: clamped hero world x, forward-only camera, dx=0 at a wall.
+; Changes: flags only. Call once per map frame after hero movement.
+UpdateCamera:
+    push bp
+    mov  bp, sp
+    push ax
+
+    mov  ax, [bp+4]
+    cmp  ax, [camera_x]
+    jle  .left_wall
+    cmp  ax, HERO_MAX_X
+    jl   .store_hero
+    mov  ax, HERO_MAX_X
+    mov  word [hero_preview_dx], 0
+    jmp  .store_hero
+.left_wall:
+    mov  ax, [camera_x]
+    mov  word [hero_preview_dx], 0
+.store_hero:
+    mov  [hero_world_x], ax
+
+    sub  ax, CAMERA_FOLLOW_X
+    cmp  ax, [camera_x]
+    jle  .done
+    cmp  ax, MAX_CAMERA_X
+    jle  .store_camera
+    mov  ax, MAX_CAMERA_X
+.store_camera:
+    mov  [camera_x], ax
 .done:
     pop  ax
     pop  bp
