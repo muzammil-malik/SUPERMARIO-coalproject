@@ -139,6 +139,8 @@ PAGE_PALETTE   equ 2
 PAGE_BUFFER_DEMO equ 3
 frame_segment  dw 0
 last_tick      dw 0
+timer_ticks    dw 0
+old_timer      dw 0, 0
 preview_phase  dw 0
 preview_page   db PAGE_MAP
 demo_x         dw 0
@@ -488,6 +490,7 @@ Start:
     call ResetMap
     call ResetCamera
     call InstallKeyboard
+    call InstallTimer
     push word [frame_segment]
     call RunBufferedPreview
     jmp  ExitToDOS
@@ -509,6 +512,7 @@ FrameAllocationFailed:
 ; Inputs: none. Output: DOS exit status 0.
 ; Registers changed: AX and any BIOS clobbers. This routine never returns.
 ExitToDOS:
+    call RestoreTimer
     call RestoreKeyboard
     mov  ax, TEXT_MODE
     int  10h
@@ -1806,6 +1810,48 @@ DrawKeyboardIndicators:
     ret
 .codes:
     db KEY_RIGHT, KEY_LEFT_SHIFT, KEY_SPACE
+
+; Save and hook the BIOS user timer vector. DS = project data.
+; Keeps the original BIOS timer rate and IRQ0 processing.
+InstallTimer:
+    push ax
+    push bx
+    push dx
+    push es
+    mov  ax, 351Ch
+    int  21h
+    mov  [old_timer], bx
+    mov  [old_timer+2], es
+    mov  dx, TimerISR
+    mov  ax, 251Ch
+    int  21h
+    pop  es
+    pop  dx
+    pop  bx
+    pop  ax
+    ret
+
+; Restore the saved vector before DOS frees the program segment.
+RestoreTimer:
+    push ax
+    push dx
+    push ds
+    mov  dx, [old_timer]
+    mov  ds, [old_timer+2]
+    mov  ax, 251Ch
+    int  21h
+    pop  ds
+    pop  dx
+    pop  ax
+    ret
+
+; Called by BIOS INT 08h. Keep the interrupted flags and stack frame
+; intact for the original INT 1Ch handler, which returns with IRET.
+TimerISR:
+    pushf
+    inc  word [cs:timer_ticks]
+    popf
+    jmp  far [cs:old_timer]
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
     align 2, db 0
