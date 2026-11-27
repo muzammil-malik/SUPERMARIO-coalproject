@@ -1336,6 +1336,8 @@ RunBufferedPreview:
     call DrawPreviewEnemies
     call DrawCameraHero
     call DrawKeyboardIndicators
+    push word [time_left]
+    call DrawClock
     jmp  .present
 .buffer_demo:
     mov  ax, [preview_column]
@@ -1911,6 +1913,100 @@ AdvanceGameClock:
     pop  ax
     pop  bp
     ret  2
+
+; Three-column, five-row digit bitmaps (one byte per row).
+clock_digits:
+    db 7,5,5,5,7
+    db 2,6,2,2,7
+    db 7,1,7,4,7
+    db 7,1,7,1,7
+    db 5,5,7,1,1
+    db 7,4,7,1,7
+    db 7,4,7,5,7
+    db 7,1,1,1,1
+    db 7,5,7,5,7
+    db 7,5,7,1,7
+
+; DrawClock(seconds)
+; Draw three decimal digits right to left in the fixed HUD strip.
+DrawClock:
+    push bp
+    mov  bp, sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    mov  ax, [bp+4]
+    mov  bx, 10
+    mov  si, 306
+    mov  cx, 3
+.digit:
+    xor  dx, dx
+    div  bx
+    push dx                    ; remainder is the next digit
+    push si
+    call DrawClockDigit
+    sub  si, 9
+    loop .digit
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    pop  bp
+    ret  2
+
+; DrawClockDigit(x, digit)
+; Draw one 3x5 digit using 2x2 pixel blocks. Preserves registers.
+DrawClockDigit:
+    push bp
+    mov  bp, sp
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov  ax, [bp+6]
+    mov  bx, 5
+    mul  bx
+    mov  si, ax
+    mov  dx, 3
+.row:
+    mov  al, [clock_digits+si]
+    mov  bx, [bp+4]
+    mov  cx, 3
+    mov  di, 4
+.column:
+    test ax, di
+    jz   .next
+    push ax
+    mov  ax, COLOR_TEXT
+    push ax
+    mov  ax, 2
+    push ax
+    push ax
+    push dx
+    push bx
+    call FillRect
+    pop  ax
+.next:
+    shr  di, 1
+    add  bx, 2
+    loop .column
+    inc  si
+    add  dx, 2
+    cmp  dx, 13
+    jb   .row
+    pop  di
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    pop  bp
+    ret  4
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
     align 2, db 0
