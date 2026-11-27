@@ -32,6 +32,7 @@ KEY_UP          equ 48h
 KEY_DOWN        equ 50h
 KEY_SPACE       equ 39h
 KEY_LEFT_SHIFT  equ 2Ah
+KEY_RIGHT_SHIFT equ 36h
 KEY_P           equ 19h
 KEY_ENTER       equ 1Ch
 KEY_ESC         equ 01h
@@ -1727,8 +1728,9 @@ PollPreviewKeys:
     call HandlePreviewKey
     cmp  byte [preview_page], PAGE_MAP
     jne  .done
-    cmp  byte [key_state+KEY_LEFT_SHIFT], 0
-    je   .check_vertical
+    call ReadShiftHeld
+    or   al, al
+    jz   .check_vertical
     shl  word [hero_preview_dx], 1
 .check_vertical:
     mov  bl, KEY_UP
@@ -1749,8 +1751,15 @@ PollPreviewKeys:
     pop  ax
     ret
 
+; ReadShiftHeld
+; DS = program data. Returns AL = 1 if either Shift is held.
+ReadShiftHeld:
+    mov  al, [key_state+KEY_LEFT_SHIFT]
+    or   al, [key_state+KEY_RIGHT_SHIFT]
+    ret
+
 ; DrawKeyboardIndicators
-; Three boxes in the HUD: Right, Left Shift, Space (left to right).
+; Three boxes in the HUD: Right, either Shift, Space (left to right).
 ; A bright green box means that key is held. Preserves registers.
 DrawKeyboardIndicators:
     pushf
@@ -1767,9 +1776,14 @@ DrawKeyboardIndicators:
     xor  ah, ah
     push bx
     mov  bx, ax
+    mov  al, [key_state+bx]
+    cmp  bx, KEY_LEFT_SHIFT
+    jne  .choose_color
+    call ReadShiftHeld
+.choose_color:
+    or   al, al
     mov  ax, 8
-    cmp  byte [key_state+bx], 0
-    je   .draw
+    jz   .draw
     mov  ax, 10
 .draw:
     pop  bx
