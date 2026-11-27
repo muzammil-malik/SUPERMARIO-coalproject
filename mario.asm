@@ -1249,25 +1249,13 @@ PresentFrame:
     pop  bp
     ret  2
 
-; ReadBIOSClock
-; Inputs: none. Returns: AX = low word of the BIOS tick count.
-; Changes: AX. Reading the BIOS data area leaves the DOS clock alone.
-ReadBIOSClock:
-    push es
-    mov  ax, 0040h
-    mov  es, ax
-    mov  ax, [es:006Ch]
-    pop  es
-    ret
-
-; WaitForPreviewTick(previous_tick)
-; Inputs: the last observed BIOS low tick word at [bp+4].
-; Returns: AX = a new low tick word. Changes: AX and flags.
-WaitForPreviewTick:
+; WaitForNextTick(previous_tick)
+; Returns current tick in AX. Waits for the ISR, without a fixed delay.
+WaitForNextTick:
     push bp
     mov  bp, sp
 .wait:
-    call ReadBIOSClock
+    mov  ax, [timer_ticks]
     cmp  ax, [bp+4]
     je   .wait
     pop  bp
@@ -1284,9 +1272,11 @@ RunBufferedPreview:
     push cx
     push es
     mov  es, [bp+4]
+    mov  ax, [timer_ticks]
+    mov  [last_tick], ax
 .frame:
     push word [last_tick]
-    call WaitForPreviewTick
+    call WaitForNextTick
     mov  [last_tick], ax
     xor  word [preview_phase], 1
     mov  word [hero_preview_dx], 0
