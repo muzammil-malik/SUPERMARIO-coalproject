@@ -36,6 +36,10 @@ KEY_P           equ 19h
 KEY_ENTER       equ 1Ch
 KEY_ESC         equ 01h
 KEY_COUNT       equ 128
+KEY_A           equ 1Eh
+KEY_D           equ 20h
+KEY_COMMA       equ 33h
+KEY_PERIOD      equ 34h
 
 ; Game limits (Appendix A.4).
 START_LIVES     equ 3
@@ -75,6 +79,16 @@ time_left       dw START_TIME
 
 ; Keyboard.
 key_state       times KEY_COUNT db 0
+key_pressed     times KEY_COUNT db 0
+old_keyboard_offset dw 0
+old_keyboard_segment dw 0
+
+; Scan code, ASCII character for one-shot preview commands.
+preview_commands:
+    db KEY_P, 'p', 1Fh, 's', 26h, 'l', 2Fh, 'v'
+    db 13h, 'r', 14h, 't', 31h, 'n', 32h, 'm', 30h, 'b'
+    db KEY_ENTER, 13
+PREVIEW_COMMAND_COUNT equ ($ - preview_commands) / 2
 
 ; Preview swatches, in display order from left to right.
 preview_colors  db COLOR_SKY, COLOR_GROUND, COLOR_BRICK, COLOR_PIPE
@@ -472,6 +486,7 @@ Start:
 
     call ResetMap
     call ResetCamera
+    call InstallKeyboard
     push word [frame_segment]
     call RunBufferedPreview
     jmp  ExitToDOS
@@ -493,6 +508,7 @@ FrameAllocationFailed:
 ; Inputs: none. Output: DOS exit status 0.
 ; Registers changed: AX and any BIOS clobbers. This routine never returns.
 ExitToDOS:
+    call RestoreKeyboard
     mov  ax, TEXT_MODE
     int  10h
 
@@ -1270,18 +1286,13 @@ RunBufferedPreview:
     xor  word [preview_phase], 1
     mov  word [hero_preview_dx], 0
 
-    mov  ah, 01h
-    int  16h
-    jz   .render
-    mov  ah, 00h
-    int  16h
-    cmp  al, 27
-    jne  .handle_key
+    xor  al, al
+    xchg al, [key_pressed+KEY_ESC]
+    or   al, al
+    jz   .input
     jmp  near .done
-.handle_key:
-    push ax
-    call HandlePreviewKey
-.render:
+.input:
+    call PollPreviewKeys
     xor  ax, ax
     push ax
     call ClearFrame
@@ -1310,6 +1321,7 @@ RunBufferedPreview:
     push word [camera_x]
     call DrawPreviewEnemies
     call DrawCameraHero
+    call DrawKeyboardIndicators
     jmp  .present
 .buffer_demo:
     mov  ax, [preview_column]
@@ -1462,7 +1474,7 @@ UpdateCameraPreview:
     mov  bp, sp
     push ax
     mov  ax, [bp+4]
-    cmp  al, ' '
+    cmp  al, 13
     jne  .check_pause
     xor  byte [camera_paused], 1
     jmp  .done
@@ -1563,6 +1575,223 @@ UpdateCamera:
     pop  ax
     pop  bp
     ret  2
+
+; InstallKeyboard / RestoreKeyboard
+; Save the DOS IRQ1 vector and replace it for the duration of the preview.
+; Inputs: DS = program segment. Preserve registers; flags may change.
+InstallKeyboard:
+    push ax
+    push bx
+    push dx
+    push ds
+    push es
+    mov  ax, 3509h
+    int  21h
+    mov  [old_keyboard_offset], bx
+    mov  [old_keyboard_segment], es
+    mov  dx, KeyboardISR
+    mov  ax, 2509h
+    int  21h
+    pop  es
+    pop  ds
+    pop  dx
+    pop  bx
+    pop  ax
+    ret
+
+RestoreKeyboard:
+    push ax
+    push dx
+    push ds
+    mov  dx, [old_keyboard_offset]
+    mov  ds, [old_keyboard_segment]
+    mov  ax, 2509h
+    int  21h
+    pop  ds
+    pop  dx
+    pop  ax
+    ret
+
+; KeyboardISR
+; IRQ1 owns port 60h while installed. Complete the interrupt here.
+; Use CS overrides because the interrupt may arrive while DS is the buffer.
+KeyboardISR:
+    push ax
+    push bx
+    in   al, 60h
+    cmp  al, 0E0h
+    je   .ack
+    mov  ah, al
+    and  al, 7Fh
+    xor  bx, bx
+    mov  bl, al
+    test ah, 80h
+    jnz  .release
+    cmp  byte [cs:key_state+bx], 0
+    jne  .ack                    ; typematic make, still the same press
+    mov  byte [cs:key_state+bx], 1
+    mov  byte [cs:key_pressed+bx], 1
+    jmp  .ack
+.release:
+    mov  byte [cs:key_state+bx], 0
+.ack:
+    ; Pulse the keyboard acknowledge line while preserving the other bits.
+    in   al, 61h
+    mov  ah, al
+    or   al, 80h
+    out  61h, al
+    mov  al, ah
+    out  61h, al
+    mov  al, 20h
+    out  20h, al
+    pop  bx
+    pop  ax
+    iret
+
+; PollPreviewKeys
+; Read press events for commands, then read the held keys for movement.
+; XCHG takes and clears an event in one instruction. Preserves registers.
+PollPreviewKeys:
+    push ax
+    push bx
+    push cx
+    push si
+
+    mov  si, preview_commands
+    mov  cx, PREVIEW_COMMAND_COUNT
+.command:
+    xor  bx, bx
+    mov  bl, [si]
+    xor  al, al
+    xchg al, [key_pressed+bx]
+    or   al, al
+    jz   .next_command
+    xor  ah, ah
+    mov  al, [si+1]
+    push ax
+    call HandlePreviewKey
+.next_command:
+    add  si, 2
+    loop .command
+
+    cmp  byte [preview_page], PAGE_MAP
+    jne  .vertical
+    ; On the world page, A/D and the arrows are equivalent.
+    mov  al, [key_state+KEY_LEFT]
+    or   al, [key_state+KEY_A]
+    mov  ah, [key_state+KEY_RIGHT]
+    or   ah, [key_state+KEY_D]
+    cmp  al, ah
+    jne  .horizontal
+    xor  al, al
+    xchg al, [key_pressed+KEY_COMMA]
+    or   al, al
+    jz   .period
+    mov  al, ','
+    jmp  .fine
+.period:
+    xor  al, al
+    xchg al, [key_pressed+KEY_PERIOD]
+    or   al, al
+    jz   .vertical
+    mov  al, '.'
+.fine:
+    xor  ah, ah
+    push ax
+    call HandlePreviewKey
+    jmp  .vertical
+.horizontal:
+    mov  ah, KEY_RIGHT
+    or   al, al
+    jz   .send_horizontal
+    mov  ah, KEY_LEFT
+    jmp  .send_horizontal
+.vertical:
+    mov  bl, KEY_UP
+    cmp  byte [key_state+KEY_UP], 0
+    jne  .send_vertical
+    mov  bl, KEY_DOWN
+    cmp  byte [key_state+KEY_DOWN], 0
+    jne  .send_vertical
+    cmp  byte [preview_page], PAGE_MAP
+    je   .done
+    mov  ah, KEY_LEFT
+    cmp  byte [key_state+KEY_LEFT], 0
+    jne  .send_horizontal
+    mov  ah, KEY_RIGHT
+    cmp  byte [key_state+KEY_RIGHT], 0
+    je   .done
+.send_horizontal:
+    xor  al, al
+    push ax
+    call HandlePreviewKey
+    cmp  byte [preview_page], PAGE_MAP
+    jne  .done
+    cmp  byte [key_state+KEY_LEFT_SHIFT], 0
+    je   .check_vertical
+    shl  word [hero_preview_dx], 1
+.check_vertical:
+    mov  bl, KEY_UP
+    cmp  byte [key_state+KEY_UP], 0
+    jne  .send_vertical
+    mov  bl, KEY_DOWN
+    cmp  byte [key_state+KEY_DOWN], 0
+    je   .done
+.send_vertical:
+    xor  al, al
+    mov  ah, bl
+    push ax
+    call HandlePreviewKey
+.done:
+    pop  si
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; DrawKeyboardIndicators
+; Three boxes in the HUD: Right, Left Shift, Space (left to right).
+; A bright green box means that key is held. Preserves registers.
+DrawKeyboardIndicators:
+    pushf
+    cld
+    push ax
+    push bx
+    push cx
+    push si
+    mov  bx, 8
+    mov  si, .codes
+    mov  cx, 3
+.box:
+    lodsb
+    xor  ah, ah
+    push bx
+    mov  bx, ax
+    mov  ax, 8
+    cmp  byte [key_state+bx], 0
+    je   .draw
+    mov  ax, 10
+.draw:
+    pop  bx
+    push ax
+    mov  ax, 8
+    push ax
+    mov  ax, 12
+    push ax
+    mov  ax, 4
+    push ax
+    push bx
+    call FillRect
+    add  bx, 16
+    loop .box
+    pop  si
+    pop  cx
+    pop  bx
+    pop  ax
+    popf
+    ret
+.codes:
+    db KEY_RIGHT, KEY_LEFT_SHIFT, KEY_SPACE
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
     align 2, db 0
