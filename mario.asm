@@ -77,6 +77,12 @@ lives           db START_LIVES
 
 ; Clock.
 time_left       dw START_TIME
+clock_low       dw 0
+clock_high      dw 0
+; Standard PIT input clocks per second, expressed as two words.
+PIT_HZ          equ 1193182
+PIT_HZ_LOW      equ PIT_HZ & 0FFFFh
+PIT_HZ_HIGH     equ PIT_HZ >> 16
 
 ; Keyboard.
 key_state       times KEY_COUNT db 0
@@ -489,6 +495,7 @@ Start:
 
     call ResetMap
     call ResetCamera
+    call ResetGameClock
     call InstallKeyboard
     call InstallTimer
     push word [frame_segment]
@@ -1270,6 +1277,7 @@ RunBufferedPreview:
     mov  bp, sp
     push ax
     push cx
+    push dx
     push es
     mov  es, [bp+4]
     mov  ax, [timer_ticks]
@@ -1277,7 +1285,18 @@ RunBufferedPreview:
 .frame:
     push word [last_tick]
     call WaitForNextTick
+    mov  dx, ax
+    sub  dx, [last_tick]       ; elapsed ticks, including 16-bit wrap
     mov  [last_tick], ax
+
+    ; Charge the elapsed interval to the page and pause state it began in.
+    cmp  byte [preview_page], PAGE_MAP
+    jne  .skip_clock
+    cmp  byte [camera_paused], 0
+    jne  .skip_clock
+    push dx
+    call AdvanceGameClock
+.skip_clock:
     xor  word [preview_phase], 1
     mov  word [hero_preview_dx], 0
 
@@ -1346,6 +1365,7 @@ RunBufferedPreview:
     jmp  .frame
 .done:
     pop  es
+    pop  dx
     pop  cx
     pop  ax
     pop  bp
@@ -1414,6 +1434,7 @@ HandlePreviewKey:
     jne  .check_edit
     call ResetMap
     call ResetCamera
+    call ResetGameClock
     mov  word [preview_column], 0
     jmp  .done
 .check_edit:
@@ -1842,6 +1863,54 @@ TimerISR:
     inc  word [cs:timer_ticks]
     popf
     jmp  far [cs:old_timer]
+
+; ResetGameClock
+; Restore 300 seconds and discard the previous life's fractional time.
+ResetGameClock:
+    mov  word [time_left], START_TIME
+    mov  word [clock_low], 0
+    mov  word [clock_high], 0
+    ret
+
+; AdvanceGameClock(ticks)
+; Each stock BIOS tick represents 65536 PIT clocks, so it adds one
+; to the high word. Subtract one second while the accumulator allows.
+; Preserves registers. Time stops at zero.
+AdvanceGameClock:
+    push bp
+    mov  bp, sp
+    push ax
+    push dx
+    cmp  word [time_left], 0
+    je   .done
+    mov  ax, [clock_low]
+    mov  dx, [clock_high]
+    ; A very large delta is more than enough to expire the clock.
+    add  dx, [bp+4]
+    jc   .expired
+.second:
+    cmp  dx, PIT_HZ_HIGH
+    jb   .save
+    ja   .consume
+    cmp  ax, PIT_HZ_LOW
+    jb   .save
+.consume:
+    sub  ax, PIT_HZ_LOW
+    sbb  dx, PIT_HZ_HIGH
+    dec  word [time_left]
+    jnz  .second
+.expired:
+    call ResetGameClock
+    mov  word [time_left], 0
+    jmp  .done
+.save:
+    mov  [clock_low], ax
+    mov  [clock_high], dx
+.done:
+    pop  dx
+    pop  ax
+    pop  bp
+    ret  2
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
     align 2, db 0
