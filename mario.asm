@@ -103,6 +103,29 @@ contact_enemy   dw 0
 
 ; Enemies.
 active_enemies  db 0
+hero_defeated   db 0
+E_TYPE   equ 0
+E_STATE  equ 1
+E_X      equ 2
+E_Y      equ 4
+E_FRAC   equ 6
+E_VX     equ 8
+E_VY     equ 10
+E_TIMER  equ 12
+E_SIZE   equ 14
+E_SLEEP  equ 0
+E_WALK   equ 1
+E_FLAT   equ 2
+E_SHELL  equ 3
+E_SLIDE  equ 4
+E_GONE   equ 5
+GOOMBA_SPEED equ 0080h
+KOOPA_SPEED  equ 00C0h
+SHELL_SPEED  equ 0300h
+FLAT_TICKS   equ 18
+HURT_TICKS   equ 36
+enemy_table times MAX_ENEMIES * E_SIZE db 0
+chain_points dw 100,200,400,500,800,1000,2000,4000,5000,8000
 
 ; Score, coins and lives.
 score_low       dw 0
@@ -528,6 +551,7 @@ Start:
 
     call ResetMap
     call ResetCamera
+    call ResetEnemies
     call ResetGameClock
     call InstallKeyboard
     call InstallTimer
@@ -1061,7 +1085,7 @@ DrawSprite:
 
 ; DrawPreviewEnemies(camera_pixels)
 ; Inputs: camera position in pixels at [bp+4], DS project data, ES target.
-; Outputs: draws static enemy starts. Changes: flags only.
+; Outputs: draws live enemy records. Changes: flags only.
 DrawPreviewEnemies:
     push bp
     mov  bp, sp
@@ -1072,9 +1096,11 @@ DrawPreviewEnemies:
     push si
 
     mov  bx, [bp+4]
-    mov  si, enemy_starts
+    mov  si, enemy_table
     mov  cx, ENEMY_START_COUNT
 .enemy:
+    cmp  byte [si+E_STATE], E_GONE
+    je   .next
     mov  dx, [si+2]
     sub  dx, bx
     cmp  dx, -TILE_SIZE
@@ -1084,16 +1110,24 @@ DrawPreviewEnemies:
     xor  ax, ax
     push ax
     mov  ax, SpriteGoombaWalk
-    cmp  word [si], ENEMY_GOOMBA
+    cmp  byte [si+E_STATE], E_FLAT
+    jne  .koopa
+    mov  ax, SpriteGoombaFlat
+    jmp  .draw
+.koopa:
+    cmp  byte [si+E_TYPE], ENEMY_GOOMBA
     je   .draw
     mov  ax, SpriteKoopa
+    cmp  byte [si+E_STATE], E_SHELL
+    jb   .draw
+    mov  ax, SpriteShell
 .draw:
     push ax
     push word [si+4]
     push dx
     call DrawSprite
 .next:
-    add  si, 6
+    add  si, E_SIZE
     loop .enemy
 
     pop  si
@@ -1357,7 +1391,11 @@ RunBufferedPreview:
     je   .buffer_demo
     cmp  byte [camera_paused], 0
     jne  .draw_world
+    cmp  byte [hero_defeated], 0
+    jne  .draw_world
     call UpdateHeroPhysics
+    call UpdateEnemies
+    call ResolveEnemyContacts
 .draw_world:
     push word [camera_x]
     call DrawMap
@@ -1406,6 +1444,12 @@ RunBufferedPreview:
 ; Inputs: ES target, current hero and camera state.
 ; Outputs: hero drawn at world x minus camera x. Changes: flags only.
 DrawCameraHero:
+    cmp  word [invuln_timer], 0
+    je   .visible
+    test word [preview_phase], 1
+    jz   .visible
+    ret
+.visible:
     push ax
     push bx
     push dx
@@ -1487,6 +1531,7 @@ HandlePreviewKey:
     jne  .check_edit
     call ResetMap
     call ResetCamera
+    call ResetEnemies
     call ResetGameClock
     mov  word [preview_column], 0
     jmp  .done
@@ -1547,6 +1592,10 @@ ResetCamera:
     mov  word [hero_vx], 0
     mov  word [hero_vy], 0
     mov  byte [on_ground], 1
+    mov  byte [hero_defeated], 0
+    mov  byte [hero_form], 0
+    mov  byte [hero_hp], SMALL_HP
+    mov  word [invuln_timer], 0
     mov  byte [pit_hit], 0
     mov  byte [flag_hit], 0
     mov  byte [head_hit_code], 0
@@ -2356,26 +2405,400 @@ DetectHeroContacts:
     shr  ax, cl
     mov  [flag_feet_row], al
 .enemies:
-    mov  si, enemy_starts
-    mov  cx, ENEMY_START_COUNT
-.enemy:
-    push word [si+4]
-    push word [si+2]
-    call ClassifyHeroContact
-    test ax, ax
-    jnz  .contact
-    add  si, 6
-    loop .enemy
-    jmp  .done
-.contact:
-    mov  [enemy_contact], al
-    mov  [contact_enemy], si
 .done:
     pop  si
     pop  dx
     pop  cx
     pop  bx
     pop  ax
+    ret
+
+; ResetEnemies copies the level's spawn positions into mutable records.
+ResetEnemies:
+    push ax
+    push cx
+    push si
+    push di
+    mov  si, enemy_starts
+    mov  di, enemy_table
+    mov  cx, ENEMY_START_COUNT
+.spawn:
+    mov  ax, [si]
+    mov  [di], ax                 ; type and sleeping state
+    mov  ax, [si+2]
+    mov  [di+E_X], ax
+    mov  ax, [si+4]
+    mov  [di+E_Y], ax
+    mov  word [di+E_FRAC], 0
+    mov  word [di+E_VX], -GOOMBA_SPEED
+    cmp  byte [di], ENEMY_GOOMBA
+    je   .init
+    mov  word [di+E_VX], -KOOPA_SPEED
+.init:
+    mov  word [di+E_VY], 0
+    mov  word [di+E_TIMER], 0
+    add  si, 6
+    add  di, E_SIZE
+    loop .spawn
+    mov  byte [active_enemies], 0
+    pop  di
+    pop  si
+    pop  cx
+    pop  ax
+    ret
+
+; SI and DI point to enemy records. Returns AX = overlap.
+EnemiesOverlap:
+    mov  ax, TILE_SIZE
+    push ax
+    push ax
+    push word [di+E_Y]
+    push word [di+E_X]
+    push ax
+    push ax
+    push word [si+E_Y]
+    push word [si+E_X]
+    call RectOverlap
+    ret
+
+UpdateEnemies:
+    push ax
+    push bx
+    push cx
+    push si
+    mov  si, enemy_table
+    mov  cx, ENEMY_START_COUNT
+.next_slot:
+    cmp  byte [si+E_STATE], E_GONE
+    je   .next
+    mov  ax, [si+E_X]
+    sub  ax, [camera_x]
+    cmp  ax, -32
+    jl   .remove
+    cmp  byte [si+E_STATE], E_SLEEP
+    jne  .awake
+    cmp  ax, SCREEN_WIDTH+TILE_SIZE
+    jg   .next
+    mov  byte [si+E_STATE], E_WALK
+    inc  byte [active_enemies]
+.awake:
+    cmp  byte [si+E_STATE], E_FLAT
+    jne  .move
+    dec  word [si+E_TIMER]
+    jnz  .next
+    jmp  .remove
+.move:
+    call MoveEnemy
+    cmp  byte [si+E_STATE], E_GONE
+    je   .next
+    cmp  word [si+E_Y], LEVEL_ROWS*TILE_SIZE
+    jl   .next
+.remove:
+    call RemoveEnemy
+.next:
+    add  si, E_SIZE
+    loop .next_slot
+    pop  si
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+RemoveEnemy:
+    cmp  byte [si+E_STATE], E_SLEEP
+    je   .mark
+    dec  byte [active_enemies]
+.mark:
+    mov  byte [si+E_STATE], E_GONE
+    ret
+
+; Move a live record horizontally, then apply gravity.
+MoveEnemy:
+    push ax
+    push bx
+    push cx
+    push dx
+    push di
+    cmp  word [si+E_VX], 0
+    jne  .step_x
+    jmp  near .fall
+.step_x:
+    mov  ax, [si+E_VX]
+    add  [si+E_FRAC], al
+    mov  al, ah
+    cbw
+    adc  ax, [si+E_X]
+    mov  bx, ax
+    cmp  bx, 0
+    jl   .turn
+    cmp  bx, HERO_MAX_X
+    jg   .turn
+    cmp  word [si+E_VX], 0
+    jl   .probe
+    add  ax, TILE_SIZE-1
+.probe:
+    mov  di, ax
+    mov  dx, [si+E_Y]
+    push dx
+    push di
+    call SolidAt
+    test ax, ax
+    jnz  .turn
+    add  dx, TILE_SIZE-1
+    push dx
+    push di
+    call SolidAt
+    test ax, ax
+    jnz  .turn
+    cmp  byte [si+E_TYPE], ENEMY_KOOPA
+    jne  .commit
+    cmp  byte [si+E_STATE], E_WALK
+    jne  .commit
+    cmp  word [si+E_VY], 0
+    jne  .commit
+    inc  dx
+    push dx
+    push di
+    call SolidAt
+    test ax, ax
+    jz   .turn
+.commit:
+    xchg bx, [si+E_X]            ; BX keeps old x for an enemy turn
+    call CheckEnemyNeighbors
+    cmp  byte [si+E_STATE], E_GONE
+    jne  .fall
+    jmp  near .done
+.turn:
+    neg  word [si+E_VX]
+    mov  byte [si+E_FRAC], 0
+.fall:
+    mov  ax, [si+E_VY]
+    add  ax, GRAVITY
+    cmp  ax, FALL_LIMIT
+    jle  .step_y
+    mov  ax, FALL_LIMIT
+.step_y:
+    mov  [si+E_VY], ax
+    add  [si+E_FRAC+1], al
+    mov  al, ah
+    cbw
+    adc  [si+E_Y], ax
+    mov  dx, [si+E_Y]
+    add  dx, TILE_SIZE
+    mov  bx, [si+E_X]
+    push dx
+    push bx
+    call SolidAt
+    test ax, ax
+    jnz  .land
+    add  bx, TILE_SIZE-1
+    push dx
+    push bx
+    call SolidAt
+    test ax, ax
+    jz   .done
+.land:
+    and  dx, -TILE_SIZE
+    sub  dx, TILE_SIZE
+    mov  [si+E_Y], dx
+    mov  byte [si+E_FRAC+1], 0
+    mov  word [si+E_VY], 0
+.done:
+    pop  di
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; Walking enemies turn when they meet another walker. Sliding shells
+; remove walkers, regardless of which enemy updated first.
+CheckEnemyNeighbors:
+    mov  di, enemy_table
+    mov  cx, ENEMY_START_COUNT
+.scan:
+    cmp  si, di
+    je   .next
+    cmp  byte [di+E_STATE], E_WALK
+    jne  .other_shell
+    call EnemiesOverlap
+    test ax, ax
+    jz   .next
+    cmp  byte [si+E_STATE], E_SLIDE
+    je   .kill_other
+    mov  [si+E_X], bx
+    neg  word [si+E_VX]
+    mov  byte [si+E_FRAC], 0
+    ret
+.kill_other:
+    xchg si, di
+    call RemoveEnemy
+    xchg si, di
+    call AwardShellKill
+    jmp  .next
+.other_shell:
+    cmp  byte [di+E_STATE], E_SLIDE
+    jne  .next
+    cmp  byte [si+E_STATE], E_WALK
+    jne  .next
+    call EnemiesOverlap
+    test ax, ax
+    jz   .next
+    call RemoveEnemy
+    call AwardShellKill
+    ret
+.next:
+    add  di, E_SIZE
+    loop .scan
+    ret
+
+AwardShellKill:
+    mov  ax, 500
+    push ax
+    call AddEnemyPoints
+    ret
+
+; AddEnemyPoints(points): 32-bit score capped at 999999.
+AddEnemyPoints:
+    push bp
+    mov  bp, sp
+    push ax
+    mov  ax, [bp+4]
+    add  [score_low], ax
+    adc  word [score_high], 0
+    cmp  word [score_high], 000Fh
+    jb   .done
+    ja   .cap
+    cmp  word [score_low], 423Fh
+    jbe  .done
+.cap:
+    mov  word [score_high], 000Fh
+    mov  word [score_low], 423Fh
+.done:
+    pop  ax
+    pop  bp
+    ret  2
+
+ResolveEnemyContacts:
+    push ax
+    push cx
+    push si
+    cmp  word [invuln_timer], 0
+    je   .begin
+    dec  word [invuln_timer]
+.begin:
+    mov  si, enemy_table
+    mov  cx, ENEMY_START_COUNT
+.enemy:
+    mov  al, [si+E_STATE]
+    cmp  al, E_WALK
+    je   .test
+    cmp  al, E_SHELL
+    je   .test
+    cmp  al, E_SLIDE
+    jne  .next
+    cmp  word [si+E_TIMER], 0
+    je   .test
+    dec  word [si+E_TIMER]
+    jmp  .next
+.test:
+    cmp  byte [pit_hit], 0
+    jne  .next
+    push word [si+E_Y]
+    push word [si+E_X]
+    call ClassifyHeroContact
+    test ax, ax
+    jz   .next
+    mov  [enemy_contact], al
+    mov  [contact_enemy], si
+    cmp  byte [si+E_STATE], E_SHELL
+    je   .kick
+    cmp  ax, CONTACT_STOMP
+    je   .stomp
+    cmp  word [invuln_timer], 0
+    jne  .next
+    cmp  byte [hero_hp], SUPER_HP
+    jne  .defeat
+    mov  byte [hero_hp], SMALL_HP
+    mov  byte [hero_form], 0
+    mov  word [invuln_timer], HURT_TICKS
+    jmp  .done
+.defeat:
+    mov  byte [hero_defeated], 1
+    jmp  .done
+.kick:
+    call KickShell
+    jmp  .done
+.stomp:
+    call StompEnemy
+    jmp  .done
+.next:
+    add  si, E_SIZE
+    dec  cx
+    jz   .done
+    jmp  near .enemy
+.done:
+    pop  si
+    pop  cx
+    pop  ax
+    ret
+
+KickShell:
+    mov  byte [si+E_STATE], E_SLIDE
+    mov  word [si+E_TIMER], 8
+    mov  ax, [hero_world_x]
+    cmp  ax, [si+E_X]
+    mov  ax, SHELL_SPEED
+    jle  .set
+    neg  ax
+.set:
+    mov  [si+E_VX], ax
+    mov  ax, 400
+    push ax
+    call AddEnemyPoints
+    ret
+
+StompEnemy:
+    push bx
+    push cx
+    mov  word [si+E_VX], 0
+    cmp  byte [si+E_TYPE], ENEMY_GOOMBA
+    jne  .shell
+    mov  byte [si+E_STATE], E_FLAT
+    mov  word [si+E_TIMER], FLAT_TICKS
+    jmp  .bounce
+.shell:
+    mov  byte [si+E_STATE], E_SHELL
+    mov  word [si+E_TIMER], 0
+.bounce:
+    mov  ax, [si+E_Y]
+    sub  ax, FLOOR_REFERENCE
+    mov  cl, 8
+    shl  ax, cl
+    mov  [hero_y_fixed], ax
+    mov  byte [on_ground], 0
+    mov  ax, -0300h
+    cmp  byte [key_state+KEY_SPACE], 0
+    jne  .save
+    mov  ax, JUMP_CUT
+.save:
+    mov  [hero_vy], ax
+    xor  bx, bx
+    mov  bl, [stomp_chain]
+    cmp  bl, 10
+    jae  .life
+    inc  byte [stomp_chain]
+    shl  bx, 1
+    push word [chain_points+bx]
+    call AddEnemyPoints
+    jmp  .done
+.life:
+    cmp  byte [lives], MAX_LIVES
+    jae  .done
+    inc  byte [lives]
+.done:
+    pop  cx
+    pop  bx
     ret
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
