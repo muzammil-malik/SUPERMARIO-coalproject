@@ -127,6 +127,10 @@ FLAT_TICKS   equ 18
 HURT_TICKS   equ 36
 enemy_table times MAX_ENEMIES * E_SIZE db 0
 mushrooms times 2 * E_SIZE db 0
+coin_pop_ticks db 0
+coin_pop_x     dw 0
+coin_pop_y     dw 0
+COIN_POP_TIME  equ 12
 ENTITY_MUSHROOM equ 3
 chain_points dw 100,200,400,500,800,1000,2000,4000,5000,8000
 
@@ -1416,6 +1420,7 @@ RunBufferedPreview:
     push word [camera_x]
     call DrawPreviewEnemies
     call DrawPowerUps
+    call DrawCoinPop
     call DrawCameraHero
     call DrawKeyboardIndicators
     push word [time_left]
@@ -2293,23 +2298,16 @@ ResolveHeroY:
     mov  byte [on_ground], 1
     jmp  .snap
 .ceiling:
-    ; If the head overlaps two tiles, prefer the one under its centre.
-    mov  cx, ax
-    mov  ax, [hero_world_x]
-    add  ax, TILE_SIZE/2
-    push dx
-    push ax
-    call SolidAt
-    test ax, ax
-    jz   .record
-    mov  cx, ax
+    ; A side can stop the head, but only the centre tile can trigger.
     mov  bx, [hero_world_x]
     add  bx, TILE_SIZE/2
-.record:
+    push dx
+    push bx
+    call SolidAt
     and  bx, -TILE_SIZE
     mov  [head_hit_x], bx
     mov  [head_hit_y], dx
-    mov  [head_hit_code], cl
+    mov  [head_hit_code], al
     add  dx, TILE_SIZE
     call HeroHeight
     add  dx, ax
@@ -2898,13 +2896,16 @@ HandleBlockHit:
     cmp  al, TILE_COIN_BOX
     je   .lookup
     cmp  al, TILE_POWER_BOX
-    jne  .done
+    je   .lookup
+    jmp  near .done
 .lookup:
     push word [head_hit_y]
     push word [head_hit_x]
     call MapByteAddress
     cmp  al, [bx]
-    jne  .done
+    je   .match
+    jmp  near .done
+.match:
     cmp  al, TILE_BRICK
     jne  .question
     cmp  byte [hero_form], 0
@@ -2919,6 +2920,12 @@ HandleBlockHit:
     je   .mushroom
     mov  byte [bx], TILE_EMPTY_BOX
     call CollectCoin
+    mov  ax, [head_hit_x]
+    mov  [coin_pop_x], ax
+    mov  ax, [head_hit_y]
+    sub  ax, TILE_SIZE
+    mov  [coin_pop_y], ax
+    mov  byte [coin_pop_ticks], COIN_POP_TIME
     jmp  .done
 .mushroom:
     ; Each mushroom block can spawn once. The table has one slot per block.
@@ -3004,6 +3011,7 @@ CollectMapCoins:
     ret
 
 ResetMushrooms:
+    mov  byte [coin_pop_ticks], 0
     mov  byte [mushrooms+E_STATE], E_GONE
     mov  byte [mushrooms+E_SIZE+E_STATE], E_GONE
     ret
@@ -3018,6 +3026,10 @@ UpdatePowerUps:
     jne  .done
     cmp  byte [hero_defeated], 0
     jne  .done
+    cmp  byte [coin_pop_ticks], 0
+    je   .coins
+    dec  byte [coin_pop_ticks]
+.coins:
     call CollectMapCoins
     mov  si, mushrooms
     mov  cx, 2
@@ -3086,6 +3098,28 @@ DrawPowerUps:
     pop  si
     pop  cx
     pop  ax
+    ret
+
+; Draw a reward animation. The coin was already counted on block hit.
+DrawCoinPop:
+    cmp  byte [coin_pop_ticks], 0
+    je   .done
+    push ax
+    xor  ax, ax
+    push ax
+    mov  ax, SpriteCoin
+    push ax
+    mov  al, [coin_pop_ticks]
+    xor  ah, ah
+    add  ax, [coin_pop_y]
+    sub  ax, COIN_POP_TIME
+    push ax
+    mov  ax, [coin_pop_x]
+    sub  ax, [camera_x]
+    push ax
+    call DrawSprite
+    pop  ax
+.done:
     ret
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
