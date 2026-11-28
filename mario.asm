@@ -223,6 +223,13 @@ game_state      db STATE_TITLE
 menu_choice     db 0
 frame_delta     dw 0
 state_ticks     dw 0
+death_top_fixed dw 0
+death_velocity  dw 0
+win_start_feet  dw 0
+win_phase       db 0
+time_bonus      dw 0
+digit_top       dw 6
+flag_awards     dw 5000,5000,2000,800,400,400,100
 timer_ticks    dw 0
 old_timer      dw 0, 0
 preview_phase  dw 0
@@ -1423,7 +1430,7 @@ StateTitle:
     jz   .draw
     cmp  byte [menu_choice], 0
     jne  .exit
-    call StartPreviewGame
+    call NewGame
     jmp  DrawGameWorld
 .exit:
     mov  byte [game_state], STATE_EXIT
@@ -1501,12 +1508,11 @@ StatePlaying:
     call FollowHeroCamera
     jmp  .draw
 .win:
-    mov  byte [game_state], STATE_WINNING
-    mov  word [state_ticks], 36
+    call BeginWin
     jmp  .draw
 .death:
-    mov  byte [game_state], STATE_DYING
-    mov  word [state_ticks], 27
+    call BeginDeath
+    jmp  DrawDeathWorld
 .draw:
     jmp  DrawGameWorld
 .title:
@@ -1544,9 +1550,51 @@ CountStateTicks:
     test ax, ax
     ret
 
+BeginDeath:
+    mov  byte [game_state], STATE_DYING
+    mov  word [state_ticks], 27
+    call HeroFeet
+    mov  bx, ax
+    call HeroHeight
+    sub  bx, ax
+    sub  bx, FLOOR_REFERENCE
+    mov  cl, 8
+    shl  bx, cl
+    mov  [death_top_fixed], bx
+    mov  word [death_velocity], -0640h
+    cmp  byte [pit_hit], 0
+    je   .done
+    mov  word [death_velocity], 0500h
+.done:
+    ret
+
 StateDying:
+    ; The animation advances with the elapsed timer ticks.
+    mov  cx, [frame_delta]
+    cmp  cx, [state_ticks]
+    jbe  .step
+    mov  cx, [state_ticks]
+.step:
+    jcxz .advance
+    mov  ax, [death_top_fixed]
+    cmp  ax, (SCREEN_HEIGHT-FLOOR_REFERENCE)*256
+    jge  .advance
+    mov  bx, [death_velocity]
+    add  ax, bx
+    mov  [death_top_fixed], ax
+    cmp  bx, 0
+    jge  .falling
+    add  word [death_velocity], 0068h
+    jmp  .next_step
+.falling:
+    add  word [death_velocity], 01F4h
+.next_step:
+    loop .step
+.advance:
     call CountStateTicks
-    jnz  .show
+    jz   .finish
+    jmp  DrawDeathWorld
+.finish:
     cmp  byte [lives], 0
     je   .over
     dec  byte [lives]
@@ -1558,36 +1606,127 @@ StateDying:
     mov  byte [game_state], STATE_GAME_OVER
     mov  byte [key_pressed+KEY_ENTER], 0
     jmp  StateGameOver.show
-.show:
-    mov  si, TextDying
-    jmp  DrawMessagePanel
 
 StateLifeLost:
     call CountStateTicks
     jnz  .show
-    call ResetPreviewLevel
+    call ResetLevel
     mov  byte [game_state], STATE_PLAYING
     jmp  DrawGameWorld
 .show:
     mov  si, TextLifeLost
-    jmp  DrawMessagePanel
+    call DrawMessagePanel
+    mov  si, TextWorldOne
+    mov  dx, 104
+    call DrawCenteredText
+    xor  ax, ax
+    push ax
+    mov  ax, SpriteSmallStand
+    push ax
+    mov  ax, 110
+    push ax
+    mov  ax, 132
+    push ax
+    call DrawSprite
+    mov  ax, 2
+    push ax
+    xor  ax, ax
+    mov  al, [lives]
+    push ax
+    xor  ax, ax
+    push ax
+    mov  ax, 155
+    push ax
+    mov  word [digit_top], 114
+    call DrawHUDNumber
+    mov  word [digit_top], 6
+    ret
+
+BeginWin:
+    xor  bx, bx
+    mov  bl, [flag_feet_row]
+    cmp  bl, 2
+    jae  .cap
+    mov  bl, 2
+.cap:
+    cmp  bl, 8
+    jbe  .award
+    mov  bl, 8
+.award:
+    sub  bx, 2
+    shl  bx, 1
+    push word [flag_awards+bx]
+    call AddScore
+    mov  byte [game_state], STATE_WINNING
+    mov  byte [win_phase], 0
+    mov  word [state_ticks], 18
+    mov  word [hero_world_x], HERO_MAX_X
+    call FollowHeroCamera
+    call HeroFeet
+    mov  [win_start_feet], ax
+    mov  word [invuln_timer], 0
+    mov  word [hero_preview_flags], 0
+    mov  byte [on_ground], 0
+    ret
 
 StateWinning:
     call CountStateTicks
-    jnz  .show
+    cmp  byte [win_phase], 0
+    jne  .wait
+    ; Interpolate the feet toward the top of the flag base (row 9).
+    mov  bx, ax
+    mov  ax, 9*TILE_SIZE
+    sub  ax, [win_start_feet]
+    imul bx
+    mov  bx, 18
+    idiv bx
+    neg  ax
+    add  ax, 9*TILE_SIZE-FLOOR_REFERENCE
+    mov  cl, 8
+    shl  ax, cl
+    mov  [hero_y_fixed], ax
+    cmp  word [state_ticks], 0
+    je   .hide
+    jmp  DrawGameWorld
+.hide:
+    mov  byte [win_phase], 1
+    mov  word [state_ticks], 18
+    jmp  DrawWinWorld
+.wait:
+    test ax, ax
+    jz   .bonus
+    jmp  DrawWinWorld
+.bonus:
+    mov  ax, [time_left]
+    mov  bx, 50
+    mul  bx
+    mov  [time_bonus], ax
+    push ax
+    call AddScore
     mov  byte [game_state], STATE_COMPLETE
     mov  byte [key_pressed+KEY_ENTER], 0
     jmp  StateComplete.show
-.show:
-    mov  si, TextFlag
-    jmp  DrawMessagePanel
 
 StateComplete:
     call CheckEndEnter
     jnz  .title
 .show:
     mov  si, TextComplete
-    jmp  DrawEndPanel
+    call DrawEndPanel
+    mov  si, TextBonus
+    mov  dx, 126
+    call DrawCenteredText
+    mov  ax, 5
+    push ax
+    push word [time_bonus]
+    xor  ax, ax
+    push ax
+    mov  ax, 139
+    push ax
+    mov  word [digit_top], 133
+    call DrawHUDNumber
+    mov  word [digit_top], 6
+    ret
 .title:
     jmp  StateTitle.draw
 
@@ -1609,17 +1748,19 @@ CheckEndEnter:
 .done:
     ret
 
-StartPreviewGame:
+NewGame:
     mov  word [score_low], 0
     mov  word [score_high], 0
     mov  byte [coin_count], 0
     mov  byte [lives], START_LIVES
-    call ResetPreviewLevel
+    call ResetLevel
     mov  byte [game_state], STATE_PLAYING
     ret
 
-ResetPreviewLevel:
+ResetLevel:
     call ClearMovementKeys
+    mov  word [time_bonus], 0
+    mov  byte [key_pressed+KEY_ESC], 0
     mov  byte [key_pressed+KEY_P], 0
     call ResetMap
     call ResetCamera
@@ -1629,6 +1770,11 @@ ResetPreviewLevel:
     ret
 
 DrawGameWorld:
+    call DrawWorldBackground
+    call DrawCameraHero
+    jmp  DrawGameHUD
+
+DrawWorldBackground:
     xor  ax, ax
     push ax
     call ClearFrame
@@ -1638,12 +1784,35 @@ DrawGameWorld:
     call DrawPreviewEnemies
     call DrawPowerUps
     call DrawCoinPop
-    call DrawCameraHero
-    call DrawGameHUD
     ret
+
+DrawDeathWorld:
+    call DrawWorldBackground
+    xor  ax, ax
+    push ax
+    mov  ax, SpriteSmallJump
+    cmp  byte [hero_form], 0
+    je   .pose
+    mov  ax, SpriteSuperJump
+.pose:
+    push ax
+    mov  al, [death_top_fixed+1]
+    cbw
+    add  ax, FLOOR_REFERENCE
+    push ax
+    mov  ax, [hero_world_x]
+    sub  ax, [camera_x]
+    push ax
+    call DrawSprite
+    jmp  DrawGameHUD
+
+DrawWinWorld:
+    call DrawWorldBackground
+    jmp  DrawGameHUD
 
 DrawEndPanel:
     call DrawMessagePanel
+    call DrawGameHUD
     mov  si, TextEnter
     mov  dx, 112
     jmp  DrawCenteredText
@@ -1749,6 +1918,8 @@ TextLifeLost      db 'LIFE LOST',0
 TextFlag          db 'FLAG REACHED',0
 TextComplete      db 'LEVEL COMPLETE',0
 TextGameOver      db 'GAME OVER',0
+TextWorldOne      db 'WORLD ONE',0
+TextBonus         db 'TIME BONUS',0
 TextEnter         db 'PRESS ENTER',0
 menu_font:
     db 2,5,7,5,5, 6,5,6,5,6, 7,4,4,4,7, 6,5,5,5,6
@@ -2343,7 +2514,7 @@ DrawClockDigit:
     mov  bx, 5
     mul  bx
     mov  si, ax
-    mov  dx, 6
+    mov  dx, [digit_top]
 .row:
     mov  al, [clock_digits+si]
     mov  bx, [bp+4]
@@ -2368,7 +2539,9 @@ DrawClockDigit:
     loop .column
     inc  si
     add  dx, 2
-    cmp  dx, 16
+    mov  ax, [digit_top]
+    add  ax, 10
+    cmp  dx, ax
     jb   .row
     pop  di
     pop  si
