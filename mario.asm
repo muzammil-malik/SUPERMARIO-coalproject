@@ -1361,6 +1361,10 @@ RunBufferedPreview:
     jne  .skip_clock
     cmp  byte [camera_paused], 0
     jne  .skip_clock
+    cmp  byte [hero_defeated], 0
+    jne  .skip_clock
+    cmp  byte [pit_hit], 0
+    jne  .skip_clock
     push dx
     call AdvanceGameClock
 .skip_clock:
@@ -1415,10 +1419,10 @@ RunBufferedPreview:
     push ax
     call DrawPreviewEnemies
 
-    ; Animate an original pose across the sky above the obstacles.
+    ; Animate a coin to distinguish this test page from the player preview.
     xor  ax, ax
     push ax
-    mov  ax, SpriteSmallRun
+    mov  ax, SpriteCoin
     push ax
     mov  ax, 24
     push ax
@@ -1529,6 +1533,8 @@ HandlePreviewKey:
 .map_key:
     cmp  al, 'r'
     jne  .check_edit
+    call ClearMovementKeys
+    mov  byte [preview_page], PAGE_MAP
     call ResetMap
     call ResetCamera
     call ResetEnemies
@@ -1581,6 +1587,17 @@ EmptyPreviewBox:
 .done:
     pop  ax
     ret
+; Clear stale movement state when restarting the preview.
+ClearMovementKeys:
+    pushf
+    cli
+    mov  byte [key_state+KEY_LEFT], 0
+    mov  byte [key_state+KEY_RIGHT], 0
+    mov  byte [key_state+KEY_A], 0
+    mov  byte [key_state+KEY_D], 0
+    popf
+    ret
+
 ; ResetCamera
 ; Restores the starting view and hero position for new lives and games.
 ; Inputs: none. Outputs: camera and hero preview state. Changes: none.
@@ -1804,6 +1821,10 @@ DrawKeyboardIndicators:
     push bx
     mov  bx, ax
     mov  al, [key_state+bx]
+    cmp  bx, KEY_RIGHT
+    jne  .shift
+    or   al, [key_state+KEY_D]
+.shift:
     cmp  bx, KEY_LEFT_SHIFT
     jne  .choose_color
     call ReadShiftHeld
@@ -2505,11 +2526,14 @@ UpdateEnemies:
     ret
 
 RemoveEnemy:
+    cmp  byte [si+E_STATE], E_GONE
+    je   .done
     cmp  byte [si+E_STATE], E_SLEEP
     je   .mark
     dec  byte [active_enemies]
 .mark:
     mov  byte [si+E_STATE], E_GONE
+.done:
     ret
 
 ; Move a live record horizontally, then apply gravity.
@@ -2653,9 +2677,11 @@ CheckEnemyNeighbors:
     ret
 
 AwardShellKill:
+    push ax
     mov  ax, 500
     push ax
     call AddEnemyPoints
+    pop  ax
     ret
 
 ; AddEnemyPoints(points): 32-bit score capped at 999999.
