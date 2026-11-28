@@ -1399,6 +1399,7 @@ RunBufferedPreview:
     jne  .choose_map
     push word [preview_phase]
     call DrawSpriteGallery
+    call DrawKeyboardIndicators
     jmp  .present
 .choose_map:
     cmp  byte [preview_page], PAGE_BUFFER_DEMO
@@ -1422,9 +1423,7 @@ RunBufferedPreview:
     call DrawPowerUps
     call DrawCoinPop
     call DrawCameraHero
-    call DrawKeyboardIndicators
-    push word [time_left]
-    call DrawClock
+    call DrawGameHUD
     jmp  .present
 .buffer_demo:
     mov  ax, [preview_column]
@@ -1977,10 +1976,13 @@ clock_digits:
     db 7,1,1,1,1
     db 7,5,7,5,7
     db 7,5,7,1,7
+    db 0,5,2,5,0              ; 10: x
+    db 0,0,7,0,0              ; 11: dash
 
-; DrawClock(seconds)
-; Draw three decimal digits right to left in the fixed HUD strip.
-DrawClock:
+; DrawHUDNumber(x, high, low, digits): print a zero-padded number.
+; Divide the high word first, then divide remainder:low. Push the
+; resulting decimal digit and unwind the digits in screen order.
+DrawHUDNumber:
     push bp
     mov  bp, sp
     push ax
@@ -1988,25 +1990,38 @@ DrawClock:
     push cx
     push dx
     push si
-    mov  ax, [bp+4]
+    push di
+    mov  di, [bp+6]
+    mov  si, [bp+8]
     mov  bx, 10
-    mov  si, 306
-    mov  cx, 3
-.digit:
+    mov  cx, [bp+10]
+.divide:
     xor  dx, dx
+    mov  ax, di
     div  bx
-    push dx                    ; remainder is the next digit
+    mov  di, ax
+    mov  ax, si
+    div  bx
+    mov  si, ax
+    push dx
+    loop .divide
+    mov  si, [bp+4]
+    mov  cx, [bp+10]
+.draw:
+    pop  dx
+    push dx
     push si
     call DrawClockDigit
-    sub  si, 9
-    loop .digit
+    add  si, 9
+    loop .draw
+    pop  di
     pop  si
     pop  dx
     pop  cx
     pop  bx
     pop  ax
     pop  bp
-    ret  2
+    ret  8
 
 ; DrawClockDigit(x, digit)
 ; Draw one 3x5 digit using 2x2 pixel blocks. Preserves registers.
@@ -2023,7 +2038,7 @@ DrawClockDigit:
     mov  bx, 5
     mul  bx
     mov  si, ax
-    mov  dx, 3
+    mov  dx, 6
 .row:
     mov  al, [clock_digits+si]
     mov  bx, [bp+4]
@@ -2048,7 +2063,7 @@ DrawClockDigit:
     loop .column
     inc  si
     add  dx, 2
-    cmp  dx, 13
+    cmp  dx, 16
     jb   .row
     pop  di
     pop  si
@@ -2058,6 +2073,235 @@ DrawClockDigit:
     pop  ax
     pop  bp
     ret  4
+
+LabelSCORE:
+    db 7,4,7,1,7
+    db 7,4,4,4,7
+    db 7,5,5,5,7
+    db 6,5,6,5,5
+    db 7,4,6,4,7
+    db 255
+LabelCOINS:
+    db 7,4,4,4,7
+    db 7,5,5,5,7
+    db 7,2,2,2,7
+    db 5,7,7,7,5
+    db 7,4,7,1,7
+    db 255
+LabelWORLD:
+    db 5,5,7,7,5
+    db 7,5,5,5,7
+    db 6,5,6,5,5
+    db 4,4,4,4,7
+    db 6,5,5,5,6
+    db 255
+LabelTIME:
+    db 7,2,2,2,2
+    db 7,2,2,2,7
+    db 5,7,7,5,5
+    db 7,4,6,4,7
+    db 255
+LabelLIVES:
+    db 4,4,4,4,7
+    db 7,2,2,2,7
+    db 5,5,5,5,2
+    db 7,4,6,4,7
+    db 7,4,7,1,7
+    db 255
+LabelHEALTH:
+    db 5,5,7,5,5
+    db 7,4,6,4,7
+    db 2,5,7,5,5
+    db 4,4,4,4,7
+    db 7,2,2,2,2
+    db 5,5,7,5,5
+    db 255
+HeartFilled db 10,31,31,14,4,255
+HeartEmpty  db 10,21,17,10,4,255
+
+; DrawHUDLabel(x, bitmap): draw a run of 3x5 glyphs at y=0.
+DrawHUDLabel:
+    push bp
+    mov  bp, sp
+    push ax
+    push bx
+    push dx
+    push si
+    mov  bx, [bp+4]
+    mov  si, [bp+6]
+.glyph:
+    cmp  byte [si], 255
+    je   .done
+    xor  dx, dx
+    mov  ax, 4
+    call DrawHUDGlyph
+    add  si, 5
+    add  bx, 4
+    jmp  .glyph
+.done:
+    pop  si
+    pop  dx
+    pop  bx
+    pop  ax
+    pop  bp
+    ret  4
+
+; DrawHUDGlyph: SI bitmap, BX x, DX y, AX first bit mask.
+DrawHUDGlyph:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    mov  ch, 5
+.row:
+    mov  cl, [si]
+    push bx
+    push ax
+.column:
+    test cl, al
+    jz   .next
+    mov  di, COLOR_TEXT
+    push di
+    push dx
+    push bx
+    call PutPixel
+.next:
+    inc  bx
+    shr  al, 1
+    jnz  .column
+    pop  ax
+    pop  bx
+    inc  si
+    inc  dx
+    dec  ch
+    jnz  .row
+    pop  di
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+DrawGameHUD:
+    push ax
+    push bx
+    push dx
+    push si
+    mov  ax, LabelSCORE
+    push ax
+    mov  ax, 8
+    push ax
+    call DrawHUDLabel
+    mov  ax, LabelCOINS
+    push ax
+    mov  ax, 77
+    push ax
+    call DrawHUDLabel
+    mov  ax, LabelWORLD
+    push ax
+    mov  ax, 128
+    push ax
+    call DrawHUDLabel
+    mov  ax, LabelTIME
+    push ax
+    mov  ax, 184
+    push ax
+    call DrawHUDLabel
+    mov  ax, LabelLIVES
+    push ax
+    mov  ax, 230
+    push ax
+    call DrawHUDLabel
+    mov  ax, LabelHEALTH
+    push ax
+    mov  ax, 275
+    push ax
+    call DrawHUDLabel
+    mov  ax, 6
+    push ax
+    push word [score_low]
+    push word [score_high]
+    mov  ax, 8
+    push ax
+    call DrawHUDNumber
+    mov  ax, 10
+    push ax
+    mov  ax, 77
+    push ax
+    call DrawClockDigit
+    mov  ax, 2
+    push ax
+    xor  ax, ax
+    mov  al, [coin_count]
+    push ax
+    xor  ax, ax
+    push ax
+    mov  ax, 86
+    push ax
+    call DrawHUDNumber
+    mov  ax, 1
+    push ax
+    mov  ax, 128
+    push ax
+    call DrawClockDigit
+    mov  ax, 11
+    push ax
+    mov  ax, 137
+    push ax
+    call DrawClockDigit
+    mov  ax, 1
+    push ax
+    mov  ax, 146
+    push ax
+    call DrawClockDigit
+    mov  ax, 3
+    push ax
+    push word [time_left]
+    xor  ax, ax
+    push ax
+    mov  ax, 184
+    push ax
+    call DrawHUDNumber
+    mov  ax, 10
+    push ax
+    mov  ax, 230
+    push ax
+    call DrawClockDigit
+    mov  ax, 2
+    push ax
+    xor  ax, ax
+    mov  al, [lives]
+    push ax
+    xor  ax, ax
+    push ax
+    mov  ax, 239
+    push ax
+    call DrawHUDNumber
+
+    mov  si, HeartEmpty
+    cmp  byte [hero_hp], 1
+    jb   .first
+    mov  si, HeartFilled
+.first:
+    mov  bx, 277
+    mov  dx, 8
+    mov  ax, 16
+    call DrawHUDGlyph
+    mov  si, HeartEmpty
+    cmp  byte [hero_hp], 2
+    jb   .second
+    mov  si, HeartFilled
+.second:
+    mov  bx, 286
+    call DrawHUDGlyph
+    pop  si
+    pop  dx
+    pop  bx
+    pop  ax
+    ret
 
 ; Reset horizontal speed and fractional position at a camera wall.
 StopHeroAtWall:
@@ -2699,12 +2943,12 @@ AwardShellKill:
     push ax
     mov  ax, 500
     push ax
-    call AddPoints
+    call AddScore
     pop  ax
     ret
 
-; AddPoints(points): 32-bit score capped at 999999.
-AddPoints:
+; AddScore(points): 32-bit score capped at 999999.
+AddScore:
     push bp
     mov  bp, sp
     push ax
@@ -2769,6 +3013,7 @@ ResolveEnemyContacts:
     mov  word [invuln_timer], HURT_TICKS
     jmp  .done
 .defeat:
+    mov  byte [hero_hp], 0
     mov  byte [hero_defeated], 1
     jmp  .done
 .kick:
@@ -2800,7 +3045,7 @@ KickShell:
     mov  [si+E_VX], ax
     mov  ax, 400
     push ax
-    call AddPoints
+    call AddScore
     ret
 
 StompEnemy:
@@ -2835,7 +3080,7 @@ StompEnemy:
     inc  byte [stomp_chain]
     shl  bx, 1
     push word [chain_points+bx]
-    call AddPoints
+    call AddScore
     jmp  .done
 .life:
     cmp  byte [lives], MAX_LIVES
@@ -2873,7 +3118,7 @@ CollectCoin:
     push ax
     mov  ax, 200
     push ax
-    call AddPoints
+    call AddScore
     inc  byte [coin_count]
     cmp  byte [coin_count], 100
     jb   .done
@@ -2913,7 +3158,7 @@ HandleBlockHit:
     mov  byte [bx], TILE_SKY
     mov  ax, 50
     push ax
-    call AddPoints
+    call AddScore
     jmp  .done
 .question:
     cmp  al, TILE_POWER_BOX
@@ -3053,7 +3298,7 @@ UpdatePowerUps:
     mov  byte [hero_hp], SUPER_HP
     mov  ax, 1000
     push ax
-    call AddPoints
+    call AddScore
 .remove:
     mov  byte [si+E_STATE], E_GONE
 .next:
