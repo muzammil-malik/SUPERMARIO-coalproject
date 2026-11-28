@@ -210,6 +210,19 @@ PAGE_PALETTE   equ 2
 PAGE_BUFFER_DEMO equ 3
 frame_segment  dw 0
 last_tick      dw 0
+STATE_TITLE     equ 0
+STATE_PLAYING   equ 1
+STATE_PAUSED    equ 2
+STATE_DYING     equ 3
+STATE_LIFE_LOST equ 4
+STATE_WINNING   equ 5
+STATE_COMPLETE  equ 6
+STATE_GAME_OVER equ 7
+STATE_EXIT      equ 8
+game_state      db STATE_TITLE
+menu_choice     db 0
+frame_delta     dw 0
+state_ticks     dw 0
 timer_ticks    dw 0
 old_timer      dw 0, 0
 preview_phase  dw 0
@@ -566,7 +579,7 @@ Start:
     call InstallKeyboard
     call InstallTimer
     push word [frame_segment]
-    call RunBufferedPreview
+    call RunGame
     jmp  ExitToDOS
 
 ; FrameAllocationFailed
@@ -1345,16 +1358,12 @@ WaitForNextTick:
     pop  bp
     ret  2
 
-; RunBufferedPreview(segment)
-; Inputs: buffer segment at [bp+4]. Outputs: a preview frame on each
-; observed BIOS tick. Esc returns so DOS can release the allocated block.
-; Changes: flags only. Preview state persists in the project data.
-RunBufferedPreview:
+; One timer-paced update and one buffered presentation per frame.
+RunGame:
     push bp
     mov  bp, sp
     push ax
-    push cx
-    push dx
+    push bx
     push es
     mov  es, [bp+4]
     mov  ax, [timer_ticks]
@@ -1362,60 +1371,267 @@ RunBufferedPreview:
 .frame:
     push word [last_tick]
     call WaitForNextTick
-    mov  dx, ax
-    sub  dx, [last_tick]       ; elapsed ticks, including 16-bit wrap
+    mov  bx, ax
+    sub  bx, [last_tick]
+    mov  [frame_delta], bx
     mov  [last_tick], ax
-
-    ; Charge the elapsed interval to the page and pause state it began in.
-    cmp  byte [preview_page], PAGE_MAP
-    jne  .skip_clock
-    cmp  byte [camera_paused], 0
-    jne  .skip_clock
-    cmp  byte [hero_defeated], 0
-    jne  .skip_clock
-    cmp  byte [pit_hit], 0
-    jne  .skip_clock
-    push dx
-    call AdvanceGameClock
-.skip_clock:
     xor  word [preview_phase], 1
 
+    xor  ax, ax
+    mov  al, [game_state]
+    cmp  al, STATE_EXIT
+    jae  .done
+    mov  bx, ax
+    shl  bx, 1
+    call word [state_handlers+bx]
+    cmp  byte [game_state], STATE_EXIT
+    je   .done
+    push word [bp+4]
+    call PresentFrame
+    jmp  .frame
+.done:
+    pop  es
+    pop  bx
+    pop  ax
+    pop  bp
+    ret  2
+
+state_handlers:
+    dw StateTitle, StatePlaying, StatePaused, StateDying
+    dw StateLifeLost, StateWinning, StateComplete, StateGameOver
+
+StateTitle:
     xor  al, al
     xchg al, [key_pressed+KEY_ESC]
-    or   al, al
-    jz   .input
-    jmp  near .done
-.input:
-    call PollPreviewKeys
-    xor  ax, ax
-    push ax
-    call ClearFrame
-    cmp  byte [preview_page], PAGE_PALETTE
-    jne  .try_sprites
-    call ShowColorTest
-    jmp  .present
-.try_sprites:
-    cmp  byte [preview_page], PAGE_SPRITES
-    jne  .choose_map
-    push word [preview_phase]
-    call DrawSpriteGallery
-    call DrawKeyboardIndicators
-    jmp  .present
-.choose_map:
-    cmp  byte [preview_page], PAGE_BUFFER_DEMO
-    je   .buffer_demo
-    cmp  byte [camera_paused], 0
-    jne  .draw_world
-    cmp  byte [hero_defeated], 0
-    jne  .draw_world
+    test al, al
+    jnz  .exit
+    xor  al, al
+    xchg al, [key_pressed+KEY_UP]
+    test al, al
+    jz   .down
+    mov  byte [menu_choice], 0
+.down:
+    xor  al, al
+    xchg al, [key_pressed+KEY_DOWN]
+    test al, al
+    jz   .enter
+    mov  byte [menu_choice], 1
+.enter:
+    xor  al, al
+    xchg al, [key_pressed+KEY_ENTER]
+    test al, al
+    jz   .draw
+    cmp  byte [menu_choice], 0
+    jne  .exit
+    call StartPreviewGame
+    jmp  DrawGameWorld
+.exit:
+    mov  byte [game_state], STATE_EXIT
+    ret
+.draw:
+    call DrawPanel
+    mov  si, TextTitle
+    mov  dx, 67
+    call DrawCenteredText
+    mov  si, TextStart
+    cmp  byte [menu_choice], 0
+    jne  .start_row
+    mov  si, TextStartSelected
+.start_row:
+    mov  dx, 96
+    call DrawCenteredText
+    mov  si, TextExit
+    cmp  byte [menu_choice], 1
+    jne  .exit_row
+    mov  si, TextExitSelected
+.exit_row:
+    mov  dx, 113
+    call DrawCenteredText
+    ret
+
+; AL = 1 if Escape returned gameplay to the title.
+CheckReturnToTitle:
+    xor  al, al
+    xchg al, [key_pressed+KEY_ESC]
+    test al, al
+    jz   .done
+    call ReturnToTitle
+.done:
+    ret
+
+ReturnToTitle:
+    mov  byte [game_state], STATE_TITLE
+    mov  byte [menu_choice], 0
+    mov  byte [key_pressed+KEY_ENTER], 0
+    mov  byte [key_pressed+KEY_UP], 0
+    mov  byte [key_pressed+KEY_DOWN], 0
+    ret
+
+StatePlaying:
+    call CheckReturnToTitle
+    test al, al
+    jz   .check_pause
+    jmp  near .title
+.check_pause:
+    xor  al, al
+    xchg al, [key_pressed+KEY_P]
+    test al, al
+    jz   .update
+    mov  byte [game_state], STATE_PAUSED
+    jmp  DrawPausedWorld
+.update:
     call UpdateHeroPhysics
     call UpdateEnemies
     call ResolveEnemyContacts
     call UpdatePowerUps
     cmp  byte [on_ground], 0
-    je   .draw_world
+    je   .clock
     mov  byte [stomp_chain], 0
-.draw_world:
+.clock:
+    push word [frame_delta]
+    call AdvanceGameClock
+    cmp  byte [pit_hit], 0
+    jne  .death
+    cmp  byte [hero_defeated], 0
+    jne  .death
+    cmp  word [time_left], 0
+    je   .death
+    cmp  byte [flag_hit], 0
+    jne  .win
+    call FollowHeroCamera
+    jmp  .draw
+.win:
+    mov  byte [game_state], STATE_WINNING
+    mov  word [state_ticks], 36
+    jmp  .draw
+.death:
+    mov  byte [game_state], STATE_DYING
+    mov  word [state_ticks], 27
+.draw:
+    jmp  DrawGameWorld
+.title:
+    jmp  StateTitle.draw
+
+StatePaused:
+    call CheckReturnToTitle
+    test al, al
+    jnz  .title
+    xor  al, al
+    xchg al, [key_pressed+KEY_P]
+    test al, al
+    jz   DrawPausedWorld
+    mov  byte [game_state], STATE_PLAYING
+    mov  byte [key_pressed+KEY_SPACE], 0
+    jmp  DrawGameWorld
+.title:
+    jmp  StateTitle.draw
+
+DrawPausedWorld:
+    call DrawGameWorld
+    call DrawPanelBox
+    mov  si, TextPaused
+    mov  dx, 95
+    jmp  DrawCenteredText
+
+; Reduce a transition timer with saturation. ZF=1 when it expires.
+CountStateTicks:
+    mov  ax, [state_ticks]
+    sub  ax, [frame_delta]
+    jnc  .save
+    xor  ax, ax
+.save:
+    mov  [state_ticks], ax
+    test ax, ax
+    ret
+
+StateDying:
+    call CountStateTicks
+    jnz  .show
+    cmp  byte [lives], 0
+    je   .over
+    dec  byte [lives]
+    jz   .over
+    mov  byte [game_state], STATE_LIFE_LOST
+    mov  word [state_ticks], 36
+    jmp  StateLifeLost.show
+.over:
+    mov  byte [game_state], STATE_GAME_OVER
+    mov  byte [key_pressed+KEY_ENTER], 0
+    jmp  StateGameOver.show
+.show:
+    mov  si, TextDying
+    jmp  DrawMessagePanel
+
+StateLifeLost:
+    call CountStateTicks
+    jnz  .show
+    call ResetPreviewLevel
+    mov  byte [game_state], STATE_PLAYING
+    jmp  DrawGameWorld
+.show:
+    mov  si, TextLifeLost
+    jmp  DrawMessagePanel
+
+StateWinning:
+    call CountStateTicks
+    jnz  .show
+    mov  byte [game_state], STATE_COMPLETE
+    mov  byte [key_pressed+KEY_ENTER], 0
+    jmp  StateComplete.show
+.show:
+    mov  si, TextFlag
+    jmp  DrawMessagePanel
+
+StateComplete:
+    call CheckEndEnter
+    jnz  .title
+.show:
+    mov  si, TextComplete
+    jmp  DrawEndPanel
+.title:
+    jmp  StateTitle.draw
+
+StateGameOver:
+    call CheckEndEnter
+    jnz  .title
+.show:
+    mov  si, TextGameOver
+    jmp  DrawEndPanel
+.title:
+    jmp  StateTitle.draw
+
+CheckEndEnter:
+    xor  al, al
+    xchg al, [key_pressed+KEY_ENTER]
+    test al, al
+    jz   .done
+    call ReturnToTitle
+.done:
+    ret
+
+StartPreviewGame:
+    mov  word [score_low], 0
+    mov  word [score_high], 0
+    mov  byte [coin_count], 0
+    mov  byte [lives], START_LIVES
+    call ResetPreviewLevel
+    mov  byte [game_state], STATE_PLAYING
+    ret
+
+ResetPreviewLevel:
+    call ClearMovementKeys
+    mov  byte [key_pressed+KEY_P], 0
+    call ResetMap
+    call ResetCamera
+    call ResetEnemies
+    call ResetMushrooms
+    call ResetGameClock
+    ret
+
+DrawGameWorld:
+    xor  ax, ax
+    push ax
+    call ClearFrame
     push word [camera_x]
     call DrawMap
     push word [camera_x]
@@ -1424,40 +1640,124 @@ RunBufferedPreview:
     call DrawCoinPop
     call DrawCameraHero
     call DrawGameHUD
-    jmp  .present
-.buffer_demo:
-    mov  ax, [preview_column]
-    mov  cl, 4
-    shl  ax, cl
-    push ax
-    call DrawMap
-    push ax
-    call DrawPreviewEnemies
+    ret
 
-    ; Animate a coin to distinguish this test page from the player preview.
-    xor  ax, ax
+DrawEndPanel:
+    call DrawMessagePanel
+    mov  si, TextEnter
+    mov  dx, 112
+    jmp  DrawCenteredText
+
+DrawMessagePanel:
+    call DrawPanel
+    mov  dx, 90
+    jmp  DrawCenteredText
+
+DrawPanel:
+    mov  ax, COLOR_SKY
     push ax
-    mov  ax, SpriteCoin
+    call ClearFrame
+DrawPanelBox:
+    mov  ax, COLOR_TEXT
     push ax
-    mov  ax, 24
+    mov  ax, 88
     push ax
-    push word [demo_x]
-    call DrawSprite
-    add  word [demo_x], 2
-    cmp  word [demo_x], SCREEN_WIDTH
-    jl   .present
-    mov  word [demo_x], -TILE_SIZE
-.present:
-    push word [bp+4]
-    call PresentFrame
-    jmp  .frame
+    mov  ax, 204
+    push ax
+    mov  ax, 54
+    push ax
+    mov  ax, 58
+    push ax
+    call FillRect
+    mov  ax, COLOR_HUD
+    push ax
+    mov  ax, 84
+    push ax
+    mov  ax, 200
+    push ax
+    mov  ax, 56
+    push ax
+    mov  ax, 60
+    push ax
+    call FillRect
+    ret
+
+; Draw zero-terminated text, centred at screen x=160. SI=text, DX=y.
+DrawCenteredText:
+    push ax
+    push bx
+    push cx
+    push si
+    push di
+    xor  cx, cx
+    mov  di, si
+.length:
+    cmp  byte [di], 0
+    je   .start
+    inc  di
+    inc  cx
+    jmp  .length
+.start:
+    shl  cx, 1
+    mov  bx, 160
+    sub  bx, cx
+.char:
+    mov  al, [si]
+    test al, al
+    jz   .done
+    inc  si
+    cmp  al, 'A'
+    jb   .symbol
+    sub  al, 'A'
+    jmp  .glyph
+.symbol:
+    cmp  al, '>'
+    je   .arrow
+    add  bx, 4
+    jmp  .char
+.arrow:
+    mov  al, 26
+.glyph:
+    xor  ah, ah
+    mov  di, ax
+    shl  ax, 1
+    shl  ax, 1
+    add  di, ax
+    push si
+    lea  si, [di+menu_font]
+    mov  ax, 4
+    call DrawHUDGlyph
+    pop  si
+    add  bx, 4
+    jmp  .char
 .done:
-    pop  es
-    pop  dx
+    pop  di
+    pop  si
     pop  cx
+    pop  bx
     pop  ax
-    pop  bp
-    ret  2
+    ret
+
+TextTitle         db 'SUPER MARIO ENGINE',0
+TextStart         db '  START',0
+TextStartSelected db '> START',0
+TextExit          db '  EXIT',0
+TextExitSelected  db '> EXIT',0
+TextPaused        db 'PAUSED',0
+TextDying         db 'MARIO DOWN',0
+TextLifeLost      db 'LIFE LOST',0
+TextFlag          db 'FLAG REACHED',0
+TextComplete      db 'LEVEL COMPLETE',0
+TextGameOver      db 'GAME OVER',0
+TextEnter         db 'PRESS ENTER',0
+menu_font:
+    db 2,5,7,5,5, 6,5,6,5,6, 7,4,4,4,7, 6,5,5,5,6
+    db 7,4,6,4,7, 7,4,6,4,4, 7,4,5,5,7, 5,5,7,5,5
+    db 7,2,2,2,7, 1,1,1,5,7, 5,5,6,5,5, 4,4,4,4,7
+    db 5,7,7,5,5, 5,7,7,5,5, 7,5,5,5,7, 7,5,7,4,4
+    db 7,5,5,7,1, 6,5,6,5,5, 7,4,7,1,7, 7,2,2,2,2
+    db 5,5,5,5,7, 5,5,5,5,2, 5,5,7,7,5, 5,5,2,5,5
+    db 5,5,2,2,2, 7,1,2,4,7, 4,2,1,2,4
 
 ; DrawCameraHero
 ; Inputs: ES target, current hero and camera state.
@@ -1644,7 +1944,13 @@ UpdateCamera:
     call StopHeroAtWall
 .store_hero:
     mov  [hero_world_x], ax
+    pop  ax
+    pop  bp
+    ret  2
 
+FollowHeroCamera:
+    push ax
+    mov  ax, [hero_world_x]
     sub  ax, CAMERA_FOLLOW_X
     cmp  ax, [camera_x]
     jle  .done
@@ -1655,8 +1961,7 @@ UpdateCamera:
     mov  [camera_x], ax
 .done:
     pop  ax
-    pop  bp
-    ret  2
+    ret
 
 ; InstallKeyboard / RestoreKeyboard
 ; Save the DOS IRQ1 vector and replace it for the duration of the preview.
