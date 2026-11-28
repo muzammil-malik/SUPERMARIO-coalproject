@@ -83,7 +83,23 @@ GRAVITY         equ 0040h
 JUMP_START      equ -0580h
 JUMP_CUT        equ -0200h
 FALL_LIMIT      equ 0400h
-PREVIEW_FLOOR   equ 10 * TILE_SIZE
+FLOOR_REFERENCE equ 10 * TILE_SIZE
+HITBOX_INSET    equ 2
+HITBOX_WIDTH    equ 12
+FLAG_COLUMN     equ LEVEL_COLUMNS - 1
+CONTACT_NONE    equ 0
+CONTACT_HURT    equ 1
+CONTACT_STOMP   equ 2
+
+previous_feet   dw FLOOR_REFERENCE
+head_hit_code   db 0
+head_hit_x      dw 0
+head_hit_y      dw 0
+pit_hit         db 0
+flag_hit        db 0
+flag_feet_row   db 0
+enemy_contact   db CONTACT_NONE
+contact_enemy   dw 0
 
 ; Enemies.
 active_enemies  db 0
@@ -1412,7 +1428,7 @@ DrawCameraHero:
     mov  ax, [hero_y_fixed]
     mov  al, ah
     cbw
-    add  ax, PREVIEW_FLOOR - TILE_SIZE
+    add  ax, FLOOR_REFERENCE - TILE_SIZE
     cmp  byte [hero_form], 0
     je   .draw
     sub  ax, SUPER_HEIGHT - TILE_SIZE
@@ -1531,6 +1547,10 @@ ResetCamera:
     mov  word [hero_vx], 0
     mov  word [hero_vy], 0
     mov  byte [on_ground], 1
+    mov  byte [pit_hit], 0
+    mov  byte [flag_hit], 0
+    mov  byte [head_hit_code], 0
+    mov  byte [enemy_contact], CONTACT_NONE
     mov  byte [stomp_chain], 0
     mov  byte [last_direction], 1
     mov  byte [key_pressed+KEY_SPACE], 0
@@ -1957,12 +1977,18 @@ StopHeroAtWall:
 
 ; UpdateHeroPhysics
 ; Position X holds a whole-pixel word plus an 8-bit fraction, since the
-; map is wider than a single 8.8 word. Y is signed 8.8 relative to the
-; preview floor. Module 10 replaces the flat floor with tile collision.
+; map is wider than a single 8.8 word. Y is signed 8.8 relative to row 10.
 UpdateHeroPhysics:
     push ax
     push bx
     push dx
+    cmp  byte [pit_hit], 0
+    je   .step
+    jmp  near .done
+.step:
+    call HeroFeet
+    mov  [previous_feet], ax
+    mov  byte [head_hit_code], 0
     mov  bx, [hero_vx]
     mov  dl, [key_state+KEY_LEFT]
     or   dl, [key_state+KEY_A]
@@ -2020,6 +2046,7 @@ UpdateHeroPhysics:
     mov  al, ah
     cbw                          ; sign-extend the velocity's whole byte
     adc  ax, [hero_world_x]
+    call ResolveHeroX
     push ax
     call UpdateCamera
 
@@ -2029,8 +2056,7 @@ UpdateHeroPhysics:
     cmp  byte [on_ground], 0
     je   .airborne
     test al, al
-    jz   .done
-    mov  byte [on_ground], 0
+    jz   .fall                  ; probe for support, even without a jump
     mov  bx, JUMP_START
     jmp  .fall
 .airborne:
@@ -2045,16 +2071,309 @@ UpdateHeroPhysics:
     jle  .move_y
     mov  bx, FALL_LIMIT
 .move_y:
-    add  [hero_y_fixed], bx
-    js   .save_y
-    mov  word [hero_y_fixed], 0
-    mov  byte [on_ground], 1
-    mov  byte [stomp_chain], 0
-    xor  bx, bx
-.save_y:
+    mov  byte [on_ground], 0
     mov  [hero_vy], bx
+    add  [hero_y_fixed], bx
+    call ResolveHeroY
+    call DetectHeroContacts
 .done:
     pop  dx
+    pop  bx
+    pop  ax
+    ret
+
+; HeroFeet returns the bottom (exclusive) world pixel in AX.
+HeroFeet:
+    mov  al, [hero_y_fixed+1]
+    cbw
+    add  ax, FLOOR_REFERENCE
+    ret
+
+; HeroHeight returns the current hitbox height in AX.
+HeroHeight:
+    mov  ax, TILE_SIZE
+    cmp  byte [hero_form], 0
+    je   .done
+    mov  ax, SUPER_HEIGHT
+.done:
+    ret
+
+; SolidAt(x, y) returns AX=tile code for solid tiles, zero otherwise.
+SolidAt:
+    push bp
+    mov  bp, sp
+    push word [bp+6]
+    push word [bp+4]
+    call GetTile
+    cmp  ax, TILE_GROUND
+    jb   .empty
+    cmp  ax, TILE_STAIR
+    jbe  .done
+.empty:
+    xor  ax, ax
+.done:
+    pop  bp
+    ret  4
+
+; ResolveHeroX: input/output AX = proposed/corrected whole sprite x.
+; Probe the leading side at each tile row covered by the hitbox.
+ResolveHeroX:
+    push bx
+    push cx
+    push dx
+    push si
+    mov  si, ax
+    cmp  si, [hero_world_x]
+    je   .done
+    call HeroFeet
+    mov  dx, ax
+    dec  dx                         ; last occupied row
+    call HeroHeight
+    mov  cx, dx
+    sub  cx, ax
+    inc  cx                         ; top row
+    lea  bx, [si+HITBOX_INSET]
+    cmp  si, [hero_world_x]
+    jl   .probe
+    add  bx, HITBOX_WIDTH-1
+.probe:
+    push cx
+    push bx
+    call SolidAt
+    test ax, ax
+    jnz  .wall
+    cmp  cx, dx
+    je   .done
+    and  cx, -TILE_SIZE
+    add  cx, TILE_SIZE
+    cmp  cx, dx
+    jle  .probe
+    jmp  .done
+.wall:
+    and  bx, -TILE_SIZE
+    cmp  si, [hero_world_x]
+    jl   .left_wall
+    sub  bx, HITBOX_INSET+HITBOX_WIDTH
+    jmp  .snap
+.left_wall:
+    add  bx, TILE_SIZE-HITBOX_INSET
+.snap:
+    mov  si, bx
+    call StopHeroAtWall
+.done:
+    mov  ax, si
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    ret
+
+; ResolveHeroY: scan the leading edge after the fixed-point Y step.
+; Max step is below one tile, so the leading edge cannot skip a tile.
+ResolveHeroY:
+    push ax
+    push bx
+    push cx
+    push dx
+    call HeroFeet
+    mov  dx, ax
+    cmp  word [hero_vy], 0
+    jl   .head
+    ; The exclusive bottom is the first row below the sprite.
+    jmp  .probe
+.head:
+    call HeroHeight
+    sub  dx, ax
+.probe:
+    mov  bx, [hero_world_x]
+    add  bx, HITBOX_INSET
+    push dx
+    push bx
+    call SolidAt
+    test ax, ax
+    jnz  .solid
+    add  bx, HITBOX_WIDTH-1
+    push dx
+    push bx
+    call SolidAt
+    test ax, ax
+    jz   .done
+.solid:
+    and  dx, -TILE_SIZE
+    cmp  word [hero_vy], 0
+    jl   .ceiling
+    mov  byte [on_ground], 1
+    mov  byte [stomp_chain], 0
+    jmp  .snap
+.ceiling:
+    ; If the head overlaps two tiles, prefer the one under its centre.
+    mov  cx, ax
+    mov  ax, [hero_world_x]
+    add  ax, TILE_SIZE/2
+    push dx
+    push ax
+    call SolidAt
+    test ax, ax
+    jz   .record
+    mov  cx, ax
+    mov  bx, [hero_world_x]
+    add  bx, TILE_SIZE/2
+.record:
+    and  bx, -TILE_SIZE
+    mov  [head_hit_x], bx
+    mov  [head_hit_y], dx
+    mov  [head_hit_code], cl
+    add  dx, TILE_SIZE
+    call HeroHeight
+    add  dx, ax
+.snap:
+    sub  dx, FLOOR_REFERENCE
+    mov  cl, 8
+    shl  dx, cl
+    mov  [hero_y_fixed], dx
+    mov  word [hero_vy], 0
+.done:
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+; RectOverlap(ax, ay, aw, ah, bx, by, bw, bh) -> AX = 0 or 1.
+; Half-open rectangles: merely touching edges does not overlap.
+RectOverlap:
+    push bp
+    mov  bp, sp
+    mov  ax, [bp+4]
+    add  ax, [bp+8]
+    cmp  ax, [bp+12]
+    jle  .no
+    mov  ax, [bp+12]
+    add  ax, [bp+16]
+    cmp  ax, [bp+4]
+    jle  .no
+    mov  ax, [bp+6]
+    add  ax, [bp+10]
+    cmp  ax, [bp+14]
+    jle  .no
+    mov  ax, [bp+14]
+    add  ax, [bp+18]
+    cmp  ax, [bp+6]
+    jle  .no
+    mov  ax, 1
+    jmp  .done
+.no:
+    xor  ax, ax
+.done:
+    pop  bp
+    ret  16
+
+; ClassifyHeroContact(enemy_x, enemy_y) -> AX = none, hurt, or stomp.
+; Enemy preview records use the standard 16x16 bounding box.
+ClassifyHeroContact:
+    push bp
+    mov  bp, sp
+    push bx
+    push dx
+    call HeroFeet
+    mov  dx, ax
+    call HeroHeight
+    sub  dx, ax
+    mov  bx, TILE_SIZE
+    push bx
+    push bx
+    push word [bp+6]
+    push word [bp+4]
+    push ax
+    mov  ax, HITBOX_WIDTH
+    push ax
+    push dx
+    mov  ax, [hero_world_x]
+    add  ax, HITBOX_INSET
+    push ax
+    call RectOverlap
+    test ax, ax
+    jz   .done
+    mov  ax, CONTACT_HURT
+    cmp  word [hero_vy], 0
+    jle  .done
+    mov  bx, [bp+6]
+    add  bx, TILE_SIZE/2
+    cmp  [previous_feet], bx
+    jge  .done
+    mov  ax, CONTACT_STOMP
+.done:
+    pop  dx
+    pop  bx
+    pop  bp
+    ret  4
+
+; DetectHeroContacts
+; Publishes events for later modules. Contact alone does not award
+; points, mutate blocks, damage enemies, or start a game-state change.
+DetectHeroContacts:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    mov  byte [enemy_contact], CONTACT_NONE
+    mov  word [contact_enemy], 0
+    mov  byte [flag_hit], 0
+    call HeroFeet
+    mov  bx, ax
+    call HeroHeight
+    sub  bx, ax
+    cmp  bx, LEVEL_ROWS*TILE_SIZE
+    jl   .pole
+    mov  byte [pit_hit], 1
+    jmp  .done
+.pole:
+    mov  dx, [hero_world_x]
+    add  dx, HITBOX_INSET+HITBOX_WIDTH-1
+    cmp  dx, FLAG_COLUMN*TILE_SIZE
+    jb   .enemies
+    ; Check each tile row crossed by the hero in the pole column.
+    call HeroFeet
+    mov  cx, ax
+    dec  cx
+.flag_row:
+    push bx
+    mov  dx, FLAG_COLUMN*TILE_SIZE
+    push dx
+    call GetTile
+    cmp  ax, TILE_FLAG
+    je   .flag
+    and  bx, -TILE_SIZE
+    add  bx, TILE_SIZE
+    cmp  bx, cx
+    jle  .flag_row
+    jmp  .enemies
+.flag:
+    mov  byte [flag_hit], 1
+    mov  ax, cx
+    mov  cl, 4
+    shr  ax, cl
+    mov  [flag_feet_row], al
+.enemies:
+    mov  si, enemy_starts
+    mov  cx, ENEMY_START_COUNT
+.enemy:
+    push word [si+4]
+    push word [si+2]
+    call ClassifyHeroContact
+    test ax, ax
+    jnz  .contact
+    add  si, 6
+    loop .enemy
+    jmp  .done
+.contact:
+    mov  [enemy_contact], al
+    mov  [contact_enemy], si
+.done:
+    pop  si
+    pop  dx
+    pop  cx
     pop  bx
     pop  ax
     ret
