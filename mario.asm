@@ -143,6 +143,8 @@ PIT_HZ_LOW      equ PIT_HZ & 0FFFFh
 PIT_HZ_HIGH     equ PIT_HZ >> 16
 
 ; Keyboard.
+keyboard_e0     db 0
+keyboard_e1     db 0
 key_state       times KEY_COUNT db 0
 key_pressed     times KEY_COUNT db 0
 old_keyboard_offset dw 0
@@ -1523,16 +1525,8 @@ HandlePreviewKey:
     mov  byte [preview_page], PAGE_BUFFER_DEMO
     jmp  .done
 .dispatch:
-    cmp  byte [preview_page], PAGE_PALETTE
-    je   .done
-    cmp  byte [preview_page], PAGE_SPRITES
-    jne  .map_key
-    push word [bp+4]
-    call UpdateSpritePreview
-    jmp  .done
-.map_key:
     cmp  al, 'r'
-    jne  .check_edit
+    jne  .page_keys
     call ClearMovementKeys
     mov  byte [preview_page], PAGE_MAP
     call ResetMap
@@ -1540,6 +1534,17 @@ HandlePreviewKey:
     call ResetEnemies
     call ResetGameClock
     mov  word [preview_column], 0
+    mov  word [score_low], 0
+    mov  word [score_high], 0
+    mov  byte [lives], START_LIVES
+    jmp  near .done
+.page_keys:
+    cmp  byte [preview_page], PAGE_PALETTE
+    je   .done
+    cmp  byte [preview_page], PAGE_SPRITES
+    jne  .check_edit
+    push word [bp+4]
+    call UpdateSpritePreview
     jmp  .done
 .check_edit:
     cmp  al, 't'
@@ -1702,12 +1707,40 @@ KeyboardISR:
     push ax
     push bx
     in   al, 60h
+    cmp  byte [cs:keyboard_e1], 0
+    je   .prefix
+    dec  byte [cs:keyboard_e1]
+    jmp  near .ack
+.prefix:
+    cmp  al, 0E1h
+    jne  .check_e0
+    mov  byte [cs:keyboard_e0], 0
+    mov  byte [cs:keyboard_e1], 5  ; remaining bytes of Pause's make sequence
+    jmp  near .ack
+.check_e0:
     cmp  al, 0E0h
-    je   .ack
+    jne  .decode
+    mov  byte [cs:keyboard_e0], 1
+    jmp  near .ack
+.decode:
     mov  ah, al
     and  al, 7Fh
     xor  bx, bx
     mov  bl, al
+    cmp  byte [cs:keyboard_e0], 0
+    je   .key
+    mov  byte [cs:keyboard_e0], 0
+    cmp  bl, KEY_ENTER
+    je   .key
+    cmp  bl, KEY_LEFT
+    je   .key
+    cmp  bl, KEY_RIGHT
+    je   .key
+    cmp  bl, KEY_UP
+    je   .key
+    cmp  bl, KEY_DOWN
+    jne  .ack                     ; ignore extended fake Shift and other keys
+.key:
     test ah, 80h
     jnz  .release
     cmp  byte [cs:key_state+bx], 0
@@ -2500,6 +2533,8 @@ UpdateEnemies:
     jne  .awake
     cmp  ax, SCREEN_WIDTH+TILE_SIZE
     jg   .next
+    cmp  byte [active_enemies], MAX_ENEMIES
+    jae  .next
     mov  byte [si+E_STATE], E_WALK
     inc  byte [active_enemies]
 .awake:
