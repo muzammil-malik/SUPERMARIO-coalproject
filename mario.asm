@@ -65,6 +65,25 @@ LIFE_LOST_SECONDS equ 2
 ; Hero.
 hero_world_x   dw 32
 hero_hp         db SMALL_HP
+hero_x_frac     db 0
+hero_y_fixed    dw 0             ; signed 8.8 offset from starting ground
+hero_vx         dw 0
+hero_vy         dw 0
+on_ground       db 1
+hero_form       db 0             ; 0 = Small, 1 = Super
+invuln_timer    dw 0
+stomp_chain     db 0
+last_direction  db 1             ; -1 = left; 1 = right
+
+WALK_ACCEL      equ 0020h
+WALK_FRICTION   equ 0010h
+WALK_LIMIT      equ 0180h
+RUN_LIMIT       equ 0280h
+GRAVITY         equ 0040h
+JUMP_START      equ -0580h
+JUMP_CUT        equ -0200h
+FALL_LIMIT      equ 0400h
+PREVIEW_FLOOR   equ 10 * TILE_SIZE
 
 ; Enemies.
 active_enemies  db 0
@@ -133,8 +152,6 @@ preview_column dw 0
 HERO_START_X    equ 32
 HERO_MAX_X      equ WORLD_WIDTH - TILE_SIZE
 camera_x        dw 0
-hero_preview_dx dw 0
-hero_preview_y  dw 24
 hero_preview_flags dw 0
 camera_paused   db 0
 FRAME_WORDS    equ SCREEN_WIDTH * SCREEN_HEIGHT / 2
@@ -1298,7 +1315,6 @@ RunBufferedPreview:
     call AdvanceGameClock
 .skip_clock:
     xor  word [preview_phase], 1
-    mov  word [hero_preview_dx], 0
 
     xor  al, al
     xchg al, [key_pressed+KEY_ESC]
@@ -1325,10 +1341,7 @@ RunBufferedPreview:
     je   .buffer_demo
     cmp  byte [camera_paused], 0
     jne  .draw_world
-    mov  ax, [hero_world_x]
-    add  ax, [hero_preview_dx]
-    push ax
-    call UpdateCamera
+    call UpdateHeroPhysics
 .draw_world:
     push word [camera_x]
     call DrawMap
@@ -1379,18 +1392,40 @@ RunBufferedPreview:
 DrawCameraHero:
     push ax
     push bx
-    mov  ax, [hero_world_x]
-    sub  ax, [camera_x]
-    mov  bx, SpriteSmallStand
-    cmp  word [hero_preview_dx], 0
+    push dx
+    push si
+    xor  bx, bx
+    cmp  byte [hero_form], 0
+    je   .pose
+    mov  bx, 6                  ; three Small sprite addresses precede Super
+.pose:
+    cmp  byte [on_ground], 0
+    jne  .ground_pose
+    add  bx, 4
+    jmp  .position
+.ground_pose:
+    cmp  word [hero_vx], 0
+    je   .position
+    add  bx, 2
+.position:
+    mov  si, [sprite_addresses+bx]
+    mov  ax, [hero_y_fixed]
+    mov  al, ah
+    cbw
+    add  ax, PREVIEW_FLOOR - TILE_SIZE
+    cmp  byte [hero_form], 0
     je   .draw
-    mov  bx, SpriteSmallRun
+    sub  ax, SUPER_HEIGHT - TILE_SIZE
 .draw:
+    mov  dx, [hero_world_x]
+    sub  dx, [camera_x]
     push word [hero_preview_flags]
-    push bx
-    push word [hero_preview_y]
+    push si
     push ax
+    push dx
     call DrawSprite
+    pop  si
+    pop  dx
     pop  bx
     pop  ax
     ret
@@ -1461,8 +1496,9 @@ HandlePreviewKey:
     inc  word [preview_column]
     jmp  .done
 .camera_keys:
-    push ax
-    call UpdateCameraPreview
+    cmp  al, 13
+    jne  .done
+    xor  byte [camera_paused], 1
 .done:
     pop  ax
     pop  bp
@@ -1484,77 +1520,20 @@ EmptyPreviewBox:
 .done:
     pop  ax
     ret
-; UpdateCameraPreview(key)
-; Input: BIOS key word at [bp+4]. Outputs: preview movement or pause.
-; Changes: flags only. Vertical preview movement leaves the camera alone.
-UpdateCameraPreview:
-    push bp
-    mov  bp, sp
-    push ax
-    mov  ax, [bp+4]
-    cmp  al, 13
-    jne  .check_pause
-    xor  byte [camera_paused], 1
-    jmp  .done
-.check_pause:
-    cmp  byte [camera_paused], 0
-    je   .active
-    jmp  near .done
-.active:
-    cmp  al, 'a'
-    je   .left
-    cmp  al, 'd'
-    je   .right
-    cmp  al, ','
-    je   .fine_left
-    cmp  al, '.'
-    je   .fine_right
-    cmp  ah, KEY_LEFT
-    je   .left
-    cmp  ah, KEY_RIGHT
-    je   .right
-    cmp  ah, KEY_UP
-    je   .up
-    cmp  ah, KEY_DOWN
-    jne  .done
-    cmp  word [hero_preview_y], 128
-    jae  .done
-    add  word [hero_preview_y], 4
-    jmp  .done
-.up:
-    cmp  word [hero_preview_y], 20
-    jbe  .done
-    sub  word [hero_preview_y], 4
-    jmp  .done
-.left:
-    mov  ax, -4
-    jmp  .set_left
-.fine_left:
-    mov  ax, -1
-.set_left:
-    mov  word [hero_preview_flags], SPRITE_MIRROR
-    jmp  .set_step
-.right:
-    mov  ax, 4
-    jmp  .set_right
-.fine_right:
-    mov  ax, 1
-.set_right:
-    mov  word [hero_preview_flags], 0
-.set_step:
-    mov  [hero_preview_dx], ax
-.done:
-    pop  ax
-    pop  bp
-    ret  2
 ; ResetCamera
 ; Restores the starting view and hero position for new lives and games.
 ; Inputs: none. Outputs: camera and hero preview state. Changes: none.
 ResetCamera:
     mov  word [camera_x], 0
     mov  word [hero_world_x], HERO_START_X
-    mov  word [hero_preview_dx], 0
-    mov  word [hero_preview_y], 24
+    mov  byte [hero_x_frac], 0
+    mov  word [hero_y_fixed], 0
+    mov  word [hero_vx], 0
+    mov  word [hero_vy], 0
+    mov  byte [on_ground], 1
+    mov  byte [stomp_chain], 0
+    mov  byte [last_direction], 1
+    mov  byte [key_pressed+KEY_SPACE], 0
     mov  word [hero_preview_flags], 0
     mov  byte [camera_paused], 0
     ret
@@ -1569,15 +1548,15 @@ UpdateCamera:
     push ax
     mov  ax, [bp+4]
     cmp  ax, [camera_x]
-    jle  .left_wall
+    jl   .left_wall
     cmp  ax, HERO_MAX_X
     jl   .store_hero
     mov  ax, HERO_MAX_X
-    mov  word [hero_preview_dx], 0
+    call StopHeroAtWall
     jmp  .store_hero
 .left_wall:
     mov  ax, [camera_x]
-    mov  word [hero_preview_dx], 0
+    call StopHeroAtWall
 .store_hero:
     mov  [hero_world_x], ax
 
@@ -1649,6 +1628,19 @@ KeyboardISR:
     jne  .ack                    ; typematic make, still the same press
     mov  byte [cs:key_state+bx], 1
     mov  byte [cs:key_pressed+bx], 1
+    cmp  bl, KEY_LEFT
+    je   .face_left
+    cmp  bl, KEY_A
+    je   .face_left
+    cmp  bl, KEY_RIGHT
+    je   .face_right
+    cmp  bl, KEY_D
+    jne  .ack
+.face_right:
+    mov  byte [cs:last_direction], 1
+    jmp  .ack
+.face_left:
+    mov  byte [cs:last_direction], -1
     jmp  .ack
 .release:
     mov  byte [cs:key_state+bx], 0
@@ -1693,72 +1685,21 @@ PollPreviewKeys:
     loop .command
 
     cmp  byte [preview_page], PAGE_MAP
-    jne  .vertical
-    ; On the world page, A/D and the arrows are equivalent.
-    mov  al, [key_state+KEY_LEFT]
-    or   al, [key_state+KEY_A]
-    mov  ah, [key_state+KEY_RIGHT]
-    or   ah, [key_state+KEY_D]
-    cmp  al, ah
-    jne  .horizontal
-    xor  al, al
-    xchg al, [key_pressed+KEY_COMMA]
-    or   al, al
-    jz   .period
-    mov  al, ','
-    jmp  .fine
-.period:
-    xor  al, al
-    xchg al, [key_pressed+KEY_PERIOD]
-    or   al, al
-    jz   .vertical
-    mov  al, '.'
-.fine:
-    xor  ah, ah
-    push ax
-    call HandlePreviewKey
-    jmp  .vertical
-.horizontal:
-    mov  ah, KEY_RIGHT
-    or   al, al
-    jz   .send_horizontal
-    mov  ah, KEY_LEFT
-    jmp  .send_horizontal
-.vertical:
-    mov  bl, KEY_UP
-    cmp  byte [key_state+KEY_UP], 0
-    jne  .send_vertical
-    mov  bl, KEY_DOWN
-    cmp  byte [key_state+KEY_DOWN], 0
-    jne  .send_vertical
-    cmp  byte [preview_page], PAGE_MAP
     je   .done
+    mov  ah, KEY_UP
+    cmp  byte [key_state+KEY_UP], 0
+    jne  .send
+    mov  ah, KEY_DOWN
+    cmp  byte [key_state+KEY_DOWN], 0
+    jne  .send
     mov  ah, KEY_LEFT
     cmp  byte [key_state+KEY_LEFT], 0
-    jne  .send_horizontal
+    jne  .send
     mov  ah, KEY_RIGHT
     cmp  byte [key_state+KEY_RIGHT], 0
     je   .done
-.send_horizontal:
+.send:
     xor  al, al
-    push ax
-    call HandlePreviewKey
-    cmp  byte [preview_page], PAGE_MAP
-    jne  .done
-    call ReadShiftHeld
-    or   al, al
-    jz   .check_vertical
-    shl  word [hero_preview_dx], 1
-.check_vertical:
-    mov  bl, KEY_UP
-    cmp  byte [key_state+KEY_UP], 0
-    jne  .send_vertical
-    mov  bl, KEY_DOWN
-    cmp  byte [key_state+KEY_DOWN], 0
-    je   .done
-.send_vertical:
-    xor  al, al
-    mov  ah, bl
     push ax
     call HandlePreviewKey
 .done:
@@ -2007,6 +1948,116 @@ DrawClockDigit:
     pop  ax
     pop  bp
     ret  4
+
+; Reset horizontal speed and fractional position at a camera wall.
+StopHeroAtWall:
+    mov  word [hero_vx], 0
+    mov  byte [hero_x_frac], 0
+    ret
+
+; UpdateHeroPhysics
+; Position X holds a whole-pixel word plus an 8-bit fraction, since the
+; map is wider than a single 8.8 word. Y is signed 8.8 relative to the
+; preview floor. Module 10 replaces the flat floor with tile collision.
+UpdateHeroPhysics:
+    push ax
+    push bx
+    push dx
+    mov  bx, [hero_vx]
+    mov  dl, [key_state+KEY_LEFT]
+    or   dl, [key_state+KEY_A]
+    mov  dh, [key_state+KEY_RIGHT]
+    or   dh, [key_state+KEY_D]
+    or   dx, dx
+    jz   .friction
+    cmp  dl, dh
+    jne  .choose
+    cmp  byte [last_direction], 0
+    jl   .left
+    jmp  .right
+.choose:
+    or   dl, dl
+    jz   .right
+.left:
+    sub  bx, WALK_ACCEL
+    mov  word [hero_preview_flags], SPRITE_MIRROR
+    jmp  .limit
+.right:
+    add  bx, WALK_ACCEL
+    mov  word [hero_preview_flags], 0
+    jmp  .limit
+.friction:
+    cmp  bx, WALK_FRICTION
+    jg   .slow_right
+    cmp  bx, -WALK_FRICTION
+    jl   .slow_left
+    xor  bx, bx
+    jmp  .limit
+.slow_right:
+    sub  bx, WALK_FRICTION
+    jmp  .limit
+.slow_left:
+    add  bx, WALK_FRICTION
+.limit:
+    mov  dx, WALK_LIMIT
+    call ReadShiftHeld
+    test al, al
+    jz   .clamp
+    mov  dx, RUN_LIMIT
+.clamp:
+    cmp  bx, dx
+    jle  .negative_limit
+    mov  bx, dx
+.negative_limit:
+    neg  dx
+    cmp  bx, dx
+    jge  .move_x
+    mov  bx, dx
+.move_x:
+    mov  [hero_vx], bx
+    mov  ax, bx
+    add  [hero_x_frac], al       ; carry transfers to the whole word
+    mov  al, ah
+    cbw                          ; sign-extend the velocity's whole byte
+    adc  ax, [hero_world_x]
+    push ax
+    call UpdateCamera
+
+    xor  al, al
+    xchg al, [key_pressed+KEY_SPACE]
+    mov  bx, [hero_vy]
+    cmp  byte [on_ground], 0
+    je   .airborne
+    test al, al
+    jz   .done
+    mov  byte [on_ground], 0
+    mov  bx, JUMP_START
+    jmp  .fall
+.airborne:
+    cmp  byte [key_state+KEY_SPACE], 0
+    jne  .fall
+    cmp  bx, JUMP_CUT
+    jge  .fall
+    mov  bx, JUMP_CUT
+.fall:
+    add  bx, GRAVITY
+    cmp  bx, FALL_LIMIT
+    jle  .move_y
+    mov  bx, FALL_LIMIT
+.move_y:
+    add  [hero_y_fixed], bx
+    js   .save_y
+    mov  word [hero_y_fixed], 0
+    mov  byte [on_ground], 1
+    mov  byte [stomp_chain], 0
+    xor  bx, bx
+.save_y:
+    mov  [hero_vy], bx
+.done:
+    pop  dx
+    pop  bx
+    pop  ax
+    ret
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
     align 2, db 0
