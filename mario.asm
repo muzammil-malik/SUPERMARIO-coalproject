@@ -92,6 +92,7 @@ CONTACT_HURT    equ 1
 CONTACT_STOMP   equ 2
 
 previous_feet   dw FLOOR_REFERENCE
+contact_fall_vy dw 0
 head_hit_code   db 0
 head_hit_x      dw 0
 head_hit_y      dw 0
@@ -1402,6 +1403,9 @@ RunBufferedPreview:
     call UpdateHeroPhysics
     call UpdateEnemies
     call ResolveEnemyContacts
+    cmp  byte [on_ground], 0
+    je   .draw_world
+    mov  byte [stomp_chain], 0
 .draw_world:
     push word [camera_x]
     call DrawMap
@@ -1749,11 +1753,7 @@ KeyboardISR:
     mov  byte [cs:key_pressed+bx], 1
     cmp  bl, KEY_LEFT
     je   .face_left
-    cmp  bl, KEY_A
-    je   .face_left
     cmp  bl, KEY_RIGHT
-    je   .face_right
-    cmp  bl, KEY_D
     jne  .ack
 .face_right:
     mov  byte [cs:last_direction], 1
@@ -1854,10 +1854,6 @@ DrawKeyboardIndicators:
     push bx
     mov  bx, ax
     mov  al, [key_state+bx]
-    cmp  bx, KEY_RIGHT
-    jne  .shift
-    or   al, [key_state+KEY_D]
-.shift:
     cmp  bx, KEY_LEFT_SHIFT
     jne  .choose_color
     call ReadShiftHeld
@@ -2091,12 +2087,11 @@ UpdateHeroPhysics:
 .step:
     call HeroFeet
     mov  [previous_feet], ax
+    mov  word [contact_fall_vy], 0
     mov  byte [head_hit_code], 0
     mov  bx, [hero_vx]
     mov  dl, [key_state+KEY_LEFT]
-    or   dl, [key_state+KEY_A]
     mov  dh, [key_state+KEY_RIGHT]
-    or   dh, [key_state+KEY_D]
     or   dx, dx
     jz   .friction
     cmp  dl, dh
@@ -2144,6 +2139,8 @@ UpdateHeroPhysics:
     mov  bx, dx
 .move_x:
     mov  [hero_vx], bx
+    test bx, bx
+    jz   .jump_input
     mov  ax, bx
     add  [hero_x_frac], al       ; carry transfers to the whole word
     mov  al, ah
@@ -2153,6 +2150,7 @@ UpdateHeroPhysics:
     push ax
     call UpdateCamera
 
+.jump_input:
     xor  al, al
     xchg al, [key_pressed+KEY_SPACE]
     mov  bx, [hero_vy]
@@ -2176,6 +2174,7 @@ UpdateHeroPhysics:
 .move_y:
     mov  byte [on_ground], 0
     mov  [hero_vy], bx
+    mov  [contact_fall_vy], bx
     add  [hero_y_fixed], bx
     call ResolveHeroY
     call DetectHeroContacts
@@ -2306,7 +2305,6 @@ ResolveHeroY:
     cmp  word [hero_vy], 0
     jl   .ceiling
     mov  byte [on_ground], 1
-    mov  byte [stomp_chain], 0
     jmp  .snap
 .ceiling:
     ; If the head overlaps two tiles, prefer the one under its centre.
@@ -2398,7 +2396,7 @@ ClassifyHeroContact:
     test ax, ax
     jz   .done
     mov  ax, CONTACT_HURT
-    cmp  word [hero_vy], 0
+    cmp  word [contact_fall_vy], 0
     jle  .done
     mov  bx, [bp+6]
     add  bx, TILE_SIZE/2
@@ -2532,7 +2530,7 @@ UpdateEnemies:
     cmp  byte [si+E_STATE], E_SLEEP
     jne  .awake
     cmp  ax, SCREEN_WIDTH+TILE_SIZE
-    jg   .next
+    jge  .next
     cmp  byte [active_enemies], MAX_ENEMIES
     jae  .next
     mov  byte [si+E_STATE], E_WALK
