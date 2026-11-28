@@ -126,6 +126,8 @@ SHELL_SPEED  equ 0300h
 FLAT_TICKS   equ 18
 HURT_TICKS   equ 36
 enemy_table times MAX_ENEMIES * E_SIZE db 0
+mushrooms times 2 * E_SIZE db 0
+ENTITY_MUSHROOM equ 3
 chain_points dw 100,200,400,500,800,1000,2000,4000,5000,8000
 
 ; Score, coins and lives.
@@ -154,7 +156,7 @@ old_keyboard_segment dw 0
 ; Scan code, ASCII character for one-shot preview commands.
 preview_commands:
     db KEY_P, 'p', 1Fh, 's', 26h, 'l', 2Fh, 'v'
-    db 13h, 'r', 14h, 't', 31h, 'n', 32h, 'm', 30h, 'b'
+    db 13h, 'r', 31h, 'n', 32h, 'm', 30h, 'b'
     db KEY_ENTER, 13
 PREVIEW_COMMAND_COUNT equ ($ - preview_commands) / 2
 
@@ -555,6 +557,7 @@ Start:
     call ResetMap
     call ResetCamera
     call ResetEnemies
+    call ResetMushrooms
     call ResetGameClock
     call InstallKeyboard
     call InstallTimer
@@ -1403,6 +1406,7 @@ RunBufferedPreview:
     call UpdateHeroPhysics
     call UpdateEnemies
     call ResolveEnemyContacts
+    call UpdatePowerUps
     cmp  byte [on_ground], 0
     je   .draw_world
     mov  byte [stomp_chain], 0
@@ -1411,6 +1415,7 @@ RunBufferedPreview:
     call DrawMap
     push word [camera_x]
     call DrawPreviewEnemies
+    call DrawPowerUps
     call DrawCameraHero
     call DrawKeyboardIndicators
     push word [time_left]
@@ -1536,8 +1541,10 @@ HandlePreviewKey:
     call ResetMap
     call ResetCamera
     call ResetEnemies
+    call ResetMushrooms
     call ResetGameClock
     mov  word [preview_column], 0
+    mov  byte [coin_count], 0
     mov  word [score_low], 0
     mov  word [score_high], 0
     mov  byte [lives], START_LIVES
@@ -1551,11 +1558,6 @@ HandlePreviewKey:
     call UpdateSpritePreview
     jmp  .done
 .check_edit:
-    cmp  al, 't'
-    jne  .movement
-    call EmptyPreviewBox
-    jmp  .done
-.movement:
     cmp  byte [preview_page], PAGE_BUFFER_DEMO
     jne  .camera_keys
     cmp  ah, KEY_LEFT
@@ -1580,22 +1582,6 @@ HandlePreviewKey:
     pop  bp
     ret  2
 
-; Empty Preview Box
-; Inputs: DS project segment. Outputs: preview mushroom box emptied.
-; Changes: flags only.
-EmptyPreviewBox:
-    push ax
-    mov  ax, 7 * TILE_SIZE
-    push ax
-    mov  ax, 5 * TILE_SIZE
-    push ax
-    call GetTile
-    cmp  ax, TILE_POWER_BOX
-    jne  .done
-    mov  byte [working_map+7*LEVEL_COLUMNS+5], TILE_EMPTY_BOX
-.done:
-    pop  ax
-    ret
 ; Clear stale movement state when restarting the preview.
 ClearMovementKeys:
     pushf
@@ -2621,6 +2607,8 @@ MoveEnemy:
     jz   .turn
 .commit:
     xchg bx, [si+E_X]            ; BX keeps old x for an enemy turn
+    cmp  byte [si+E_TYPE], ENTITY_MUSHROOM
+    je   .fall
     call CheckEnemyNeighbors
     cmp  byte [si+E_STATE], E_GONE
     jne  .fall
@@ -2713,12 +2701,12 @@ AwardShellKill:
     push ax
     mov  ax, 500
     push ax
-    call AddEnemyPoints
+    call AddPoints
     pop  ax
     ret
 
-; AddEnemyPoints(points): 32-bit score capped at 999999.
-AddEnemyPoints:
+; AddPoints(points): 32-bit score capped at 999999.
+AddPoints:
     push bp
     mov  bp, sp
     push ax
@@ -2814,7 +2802,7 @@ KickShell:
     mov  [si+E_VX], ax
     mov  ax, 400
     push ax
-    call AddEnemyPoints
+    call AddPoints
     ret
 
 StompEnemy:
@@ -2849,7 +2837,7 @@ StompEnemy:
     inc  byte [stomp_chain]
     shl  bx, 1
     push word [chain_points+bx]
-    call AddEnemyPoints
+    call AddPoints
     jmp  .done
 .life:
     cmp  byte [lives], MAX_LIVES
@@ -2858,6 +2846,246 @@ StompEnemy:
 .done:
     pop  cx
     pop  bx
+    ret
+
+; MapByteAddress(x,y): coordinates are tile-aligned and already checked.
+; Returns BX pointing to the working byte, preserving AX/CX/DX.
+MapByteAddress:
+    push bp
+    mov  bp, sp
+    push ax
+    push cx
+    push dx
+    mov  cl, 4
+    mov  ax, [bp+6]
+    shr  ax, cl
+    mov  dx, LEVEL_COLUMNS
+    mul  dx
+    mov  bx, [bp+4]
+    shr  bx, cl
+    add  bx, ax
+    add  bx, working_map
+    pop  dx
+    pop  cx
+    pop  ax
+    pop  bp
+    ret  4
+
+CollectCoin:
+    push ax
+    mov  ax, 200
+    push ax
+    call AddPoints
+    inc  byte [coin_count]
+    cmp  byte [coin_count], 100
+    jb   .done
+    mov  byte [coin_count], 0
+    cmp  byte [lives], MAX_LIVES
+    jae  .done
+    inc  byte [lives]
+.done:
+    pop  ax
+    ret
+
+HandleBlockHit:
+    push ax
+    push bx
+    push si
+    mov  al, [head_hit_code]
+    mov  byte [head_hit_code], 0
+    cmp  al, TILE_BRICK
+    je   .lookup
+    cmp  al, TILE_COIN_BOX
+    je   .lookup
+    cmp  al, TILE_POWER_BOX
+    jne  .done
+.lookup:
+    push word [head_hit_y]
+    push word [head_hit_x]
+    call MapByteAddress
+    cmp  al, [bx]
+    jne  .done
+    cmp  al, TILE_BRICK
+    jne  .question
+    cmp  byte [hero_form], 0
+    je   .done
+    mov  byte [bx], TILE_SKY
+    mov  ax, 50
+    push ax
+    call AddPoints
+    jmp  .done
+.question:
+    cmp  al, TILE_POWER_BOX
+    je   .mushroom
+    mov  byte [bx], TILE_EMPTY_BOX
+    call CollectCoin
+    jmp  .done
+.mushroom:
+    ; Each mushroom block can spawn once. The table has one slot per block.
+    mov  si, mushrooms
+    cmp  byte [si+E_STATE], E_GONE
+    je   .spawn
+    add  si, E_SIZE
+    cmp  byte [si+E_STATE], E_GONE
+    jne  .done
+.spawn:
+    mov  byte [bx], TILE_EMPTY_BOX
+    mov  byte [si+E_TYPE], ENTITY_MUSHROOM
+    mov  byte [si+E_STATE], E_WALK
+    mov  ax, [head_hit_x]
+    mov  [si+E_X], ax
+    mov  ax, [head_hit_y]
+    sub  ax, TILE_SIZE
+    mov  [si+E_Y], ax
+    mov  word [si+E_VX], 0100h
+    mov  word [si+E_VY], 0
+    mov  word [si+E_FRAC], 0
+.done:
+    pop  si
+    pop  bx
+    pop  ax
+    ret
+
+; Collect each coin tile intersected by the player's half-open hitbox.
+CollectMapCoins:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push di
+    call HeroFeet
+    mov  dx, ax
+    dec  dx
+    call HeroHeight
+    mov  si, dx
+    sub  si, ax
+    inc  si
+    jns  .top
+    xor  si, si
+.top:
+    and  si, -TILE_SIZE
+    mov  di, [hero_world_x]
+    add  di, HITBOX_INSET
+    mov  cx, di
+    add  cx, HITBOX_WIDTH-1
+.row:
+    cmp  si, LEVEL_ROWS*TILE_SIZE
+    jae  .done
+    mov  bx, di
+    and  bx, -TILE_SIZE
+.column:
+    push si
+    push bx
+    call GetTile
+    cmp  ax, TILE_COIN
+    jne  .next
+    push bx
+    push si
+    push bx
+    call MapByteAddress
+    mov  byte [bx], TILE_SKY
+    pop  bx
+    call CollectCoin
+.next:
+    add  bx, TILE_SIZE
+    cmp  bx, cx
+    jle  .column
+    add  si, TILE_SIZE
+    cmp  si, dx
+    jle  .row
+.done:
+    pop  di
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+ResetMushrooms:
+    mov  byte [mushrooms+E_STATE], E_GONE
+    mov  byte [mushrooms+E_SIZE+E_STATE], E_GONE
+    ret
+
+UpdatePowerUps:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    cmp  byte [pit_hit], 0
+    jne  .done
+    cmp  byte [hero_defeated], 0
+    jne  .done
+    call CollectMapCoins
+    mov  si, mushrooms
+    mov  cx, 2
+.item:
+    cmp  byte [si+E_STATE], E_GONE
+    je   .next
+    call MoveEnemy              ; common wall and gravity logic
+    mov  ax, [si+E_X]
+    sub  ax, [camera_x]
+    cmp  ax, -TILE_SIZE
+    jle  .remove
+    cmp  word [si+E_Y], LEVEL_ROWS*TILE_SIZE
+    jge  .remove
+    push word [si+E_Y]
+    push word [si+E_X]
+    call ClassifyHeroContact
+    test ax, ax
+    jz   .next
+    ; Y is based on the feet, so changing height keeps feet fixed.
+    mov  byte [hero_form], 1
+    mov  byte [hero_hp], SUPER_HP
+    mov  ax, 1000
+    push ax
+    call AddPoints
+.remove:
+    mov  byte [si+E_STATE], E_GONE
+.next:
+    add  si, E_SIZE
+    loop .item
+    call HandleBlockHit
+.done:
+    pop  si
+    pop  dx
+    pop  cx
+    pop  bx
+    pop  ax
+    ret
+
+DrawPowerUps:
+    push ax
+    push cx
+    push si
+    mov  si, mushrooms
+    mov  cx, 2
+.item:
+    cmp  byte [si+E_STATE], E_GONE
+    je   .next
+    mov  ax, [si+E_X]
+    sub  ax, [camera_x]
+    cmp  ax, -TILE_SIZE
+    jle  .next
+    cmp  ax, SCREEN_WIDTH
+    jge  .next
+    xor  ax, ax
+    push ax
+    mov  ax, SpriteMushroom
+    push ax
+    push word [si+E_Y]
+    mov  ax, [si+E_X]
+    sub  ax, [camera_x]
+    push ax
+    call DrawSprite
+.next:
+    add  si, E_SIZE
+    loop .item
+    pop  si
+    pop  cx
+    pop  ax
     ret
 
 ; This stack is inside the resized block; DOS frees both blocks on exit.
